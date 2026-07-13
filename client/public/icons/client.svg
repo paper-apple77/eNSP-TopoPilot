@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- 客户端 - 笔记本 -->
+  <rect x="8" y="6" width="32" height="22" fill="#AB47BC" stroke="#6A1B9A" stroke-width="2" rx="2"/>
+  <rect x="4" y="3" width="40" height="4" fill="#CE93D8" rx="2"/>
+  <polygon points="16,30 32,30 26,38 22,38" fill="#6A1B9A"/>
+  <line x1="20" y1="12" x2="20" y2="20" stroke="#E1BEE7" stroke-width="1.5"/>
+  <line x1="28" y1="12" x2="28" y2="20" stroke="#E1BEE7" stroke-width="1.5"/>
+  <line x1="16" y1="16" x2="32" y2="16" stroke="#E1BEE7" stroke-width="1"/>
+</svg>

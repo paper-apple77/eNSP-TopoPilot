@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- 交换机 - 矩形带端口 -->
+  <rect x="4" y="8" width="40" height="32" fill="#42A5F5" stroke="#1565C0" stroke-width="2" rx="3"/>
+  <rect x="10" y="14" width="6" height="4" rx="1" fill="#BBDEFB"/>
+  <rect x="21" y="14" width="6" height="4" rx="1" fill="#BBDEFB"/>
+  <rect x="32" y="14" width="6" height="4" rx="1" fill="#BBDEFB"/>
+  <rect x="10" y="22" width="6" height="4" rx="1" fill="#BBDEFB"/>
+  <rect x="21" y="22" width="6" height="4" rx="1" fill="#BBDEFB"/>
+  <rect x="32" y="22" width="6" height="4" rx="1" fill="#BBDEFB"/>
+  <rect x="10" y="30" width="6" height="4" rx="1" fill="#BBDEFB"/>
+  <rect x="21" y="30" width="6" height="4" rx="1" fill="#BBDEFB"/>
+  <rect x="32" y="30" width="6" height="4" rx="1" fill="#BBDEFB"/>
+</svg>

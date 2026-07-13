@@ -1,0 +1,30 @@
+# 依赖
+node_modules/
+server/target/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+tu/
+
+# 编译产物
+*.class
+*.jar
+*.war
+
+# 测试拓扑文件
+*.topo
+
+# 环境变量
+*.env
+*.local
+
+# 日志
+*.log
+logs/
+DeviceType/

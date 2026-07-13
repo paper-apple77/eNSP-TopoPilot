@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- 服务器 - 机架式 -->
+  <rect x="8" y="4" width="32" height="40" fill="#EF5350" stroke="#C62828" stroke-width="2" rx="2"/>
+  <rect x="14" y="10" width="20" height="5" fill="#FFCDD2" rx="1"/>
+  <rect x="14" y="19" width="20" height="5" fill="#FFCDD2" rx="1"/>
+  <rect x="14" y="28" width="20" height="5" fill="#FFCDD2" rx="1"/>
+  <circle cx="26" cy="39" r="2" fill="#4CAF50"/>
+</svg>
