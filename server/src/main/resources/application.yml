@@ -28,3 +28,7 @@ mybatis-plus:
 jwt:
   secret: ${JWT_SECRET:CHANGE_ME}
   expiration: 21600000  # 6 hours in milliseconds
+
+deepseek:
+  api-key: ${DEEPSEEK_API_KEY:}
+  model: deepseek-v4-pro

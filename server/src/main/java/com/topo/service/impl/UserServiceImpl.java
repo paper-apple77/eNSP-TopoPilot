@@ -103,6 +103,11 @@ public class UserServiceImpl implements UserService {
         }
     }
 
+    @Override
+    public Long getUserIdFromToken(String token) {
+        return jwtUtil.extractUserId(token);
+    }
+
     /**
      * MD5 加密
      * 简易实现，生产环境应使用 BCrypt

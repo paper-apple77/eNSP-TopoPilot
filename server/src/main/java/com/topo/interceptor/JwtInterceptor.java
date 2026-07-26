@@ -37,16 +37,20 @@ public class JwtInterceptor implements HandlerInterceptor {
             return true;
         }
 
-        // 提取 Authorization: Bearer xxx
+        // 提取 token：优先 Authorization header，兜底 query 参数（EventSource 不支持自定义 header）
+        String token = null;
         String authHeader = request.getHeader("Authorization");
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            token = authHeader.substring(7);
+        } else {
+            token = request.getParameter("token");
+        }
+        if (token == null) {
             response.setStatus(401);
             response.setContentType("application/json;charset=utf-8");
             response.getWriter().write("{\"code\":401,\"message\":\"未登录\"}");
             return false;
         }
-
-        String token = authHeader.substring(7); // 跳过 "Bearer " 前缀
 
         // 检查是否已登出（token 在黑名单里）
         String blacklisted = redisTemplate.opsForValue().get("blacklist:" + token);

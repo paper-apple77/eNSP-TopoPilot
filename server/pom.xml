@@ -74,6 +74,13 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- Apache Commons Net (Telnet) -->
+        <dependency>
+            <groupId>commons-net</groupId>
+            <artifactId>commons-net</artifactId>
+            <version>3.11.1</version>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

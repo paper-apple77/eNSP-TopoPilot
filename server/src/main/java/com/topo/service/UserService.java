@@ -15,4 +15,7 @@ public interface UserService {
 
     /** 登出，token 加 Redis 黑名单 */
     void logout(String token);
+
+    /** 从 token 解析用户 ID */
+    Long getUserIdFromToken(String token);
 }

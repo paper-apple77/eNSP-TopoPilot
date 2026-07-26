@@ -13,7 +13,7 @@ import router from '../router'
  */
 const request = axios.create({
   baseURL: 'http://localhost:8080/api',
-  timeout: 30000,
+  timeout: 300000,
 })
 
 // 请求拦截器：自动带 token

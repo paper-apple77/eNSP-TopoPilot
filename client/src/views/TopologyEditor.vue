@@ -1,157 +1,97 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { getTopology, updateTopology } from '../api/topology'
-import { ElMessage } from 'element-plus'
+import { ref } from 'vue'
 import TopologyCanvas from '../components/topology/TopologyCanvas.vue'
+import ChatPanel from '../components/topology/ChatPanel.vue'
+import DeviceConnector from '../components/topology/DeviceConnector.vue'
+import { exportTopo } from '../api/index'
+import { ElMessage } from 'element-plus'
 
-/**
- * 拓扑编辑器页
- *
- * 布局：左侧设备面板 | 中间 LogicFlow 画布 | 右侧 AI 对话面板（占位）
- *
- * 数据流：
- *   后端 → topologyJson → TopologyCanvas 渲染
- *   画布编辑 → emit change → topologyJson 更新 → 点保存写回后端
- */
-const route = useRoute()
-const router = useRouter()
-
-const topologyId = ref<number | null>(null)
-const topologyName = ref('新建拓扑')
 const topologyJson = ref('{"devices":[],"connections":[]}')
-const loading = ref(false)
-const saving = ref(false)
-const canvasRef = ref<InstanceType<typeof TopologyCanvas>>()
+const designMode = ref(false)
 
-onMounted(async () => {
-  const id = route.params.id
-  if (id) {
-    topologyId.value = Number(id)
-    loading.value = true
-    try {
-      const res = await getTopology(topologyId.value)
-      topologyName.value = res.data.name
-      topologyJson.value = res.data.topologyJson
-    } finally {
-      loading.value = false
-    }
-  }
-})
-
-/** 保存拓扑 */
-async function handleSave() {
-  if (!topologyId.value) return
-  saving.value = true
-  try {
-    await updateTopology(topologyId.value, topologyName.value, topologyJson.value)
-    ElMessage.success('保存成功')
-  } catch {
-    // 错误已在拦截器处理
-  } finally {
-    saving.value = false
-  }
+/** 切换到智能配网 */
+function switchToConnect() {
+  designMode.value = false
 }
 
-/** 画布变更回调：更新本地 JSON */
+/** 切换到拓扑设计（清空画布） */
+function switchToDesign() {
+  designMode.value = true
+  topologyJson.value = '{"devices":[],"connections":[]}'
+}
+
+/** 导出 .topo — 仅在拓扑设计模式使用 */
+async function handleExport() {
+  try {
+    const topo = JSON.parse(topologyJson.value)
+    const name = prompt('输入项目名称:', 'my_topology')
+    if (!name) return
+    const res = await exportTopo(topo, name)
+    const data = res.data || res
+    if (data.topoXml) {
+      const blob = new Blob([data.topoXml], { type: 'application/xml' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = data.filename || (name + '.topo'); a.click()
+      URL.revokeObjectURL(url)
+      ElMessage.success('导出成功')
+    }
+  } catch { ElMessage.error('导出失败') }
+}
+
 function onCanvasChange(json: string) {
   topologyJson.value = json
 }
 
+function deviceCount(): number {
+  try { return JSON.parse(topologyJson.value).devices?.length || 0 }
+  catch { return 0 }
+}
 </script>
 
 <template>
   <div class="editor-page">
-    <!-- 顶部工具栏 -->
+    <!-- 顶部：纯导航切换 -->
     <header class="editor-header">
-      <el-button text @click="router.push('/')">← 返回列表</el-button>
-      <el-input
-        v-model="topologyName"
-        class="name-input"
-        placeholder="拓扑名称"
-        size="default"
-      />
-      <el-tag v-if="topologyId" type="info" size="small">
-        {{ topologyJson ? JSON.parse(topologyJson).devices?.length || 0 : 0 }} 个设备
-      </el-tag>
-      <el-button type="primary" :loading="saving" @click="handleSave">
-        保存
-      </el-button>
+      <span class="logo">TopoPilot</span>
+      <div class="toolbar-actions">
+        <el-button :type="!designMode ? 'primary' : 'default'" @click="switchToConnect">
+          🔌 智能配网
+        </el-button>
+        <el-button :type="designMode ? 'warning' : 'default'" @click="switchToDesign">
+          🤖 拓扑设计
+        </el-button>
+      </div>
+      <div class="toolbar-info">
+        <el-tag v-if="!designMode" type="success" size="small">智能配网</el-tag>
+        <el-tag v-if="designMode" type="warning" size="small">拓扑设计</el-tag>
+        <el-tag v-if="deviceCount() > 0" type="info" size="small">{{ deviceCount() }} 台设备</el-tag>
+        <el-button v-if="designMode && deviceCount() > 0" @click="handleExport" type="success" plain size="small">
+          📤 导出 .topo
+        </el-button>
+      </div>
     </header>
 
     <!-- 主区域 -->
-    <div class="editor-body" v-loading="loading">
-      <!-- 中间：LogicFlow 画布 -->
+    <div class="editor-body">
       <div class="canvas-wrapper">
-        <TopologyCanvas
-          ref="canvasRef"
-          :topology-json="topologyJson"
-          @change="onCanvasChange"
-        />
+        <TopologyCanvas :topology-json="topologyJson" @change="onCanvasChange" />
       </div>
-
-      <!-- 右侧：AI 对话面板（占位） -->
-      <aside class="chat-panel">
-        <div class="chat-placeholder">
-          <p>💬 AI 配置助手</p>
-          <p style="font-size:12px;color:#999;">选中设备后<br>可对话生成配置<br>（下一步完成）</p>
-        </div>
-      </aside>
+      <div class="right-panel">
+        <DeviceConnector v-if="!designMode" :topology-json="topologyJson" @topology-update="onCanvasChange" />
+        <ChatPanel :topology-json="topologyJson" :mode="designMode ? 'design' : 'connect'" @topo-update="onCanvasChange" />
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.editor-page {
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.editor-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 16px;
-  background: #fff;
-  border-bottom: 1px solid #eee;
-  flex-shrink: 0;
-}
-
-.name-input {
-  width: 260px;
-}
-
-.editor-body {
-  flex: 1;
-  display: flex;
-  overflow: hidden;
-}
-
-.canvas-wrapper {
-  flex: 1;
-  background: #fafafa;
-  position: relative;
-  overflow: hidden;
-  min-height: 0; /* flex child 需要 min-height:0 才能正确收缩 */
-}
-
-.chat-panel {
-  width: 260px;
-  background: #fff;
-  border-left: 1px solid #eee;
-  flex-shrink: 0;
-}
-
-.chat-placeholder {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  text-align: center;
-  color: #666;
-  font-size: 14px;
-}
+.editor-page { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+.editor-header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: #fff; border-bottom: 1px solid #eee; flex-shrink: 0; }
+.logo { font-weight: 700; font-size: 16px; color: #409EFF; }
+.toolbar-actions { flex: 1; display: flex; gap: 8px; }
+.toolbar-info { display: flex; align-items: center; gap: 6px; }
+.editor-body { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+.canvas-wrapper { flex: 1; background: #fafafa; position: relative; overflow: hidden; min-height: 0; }
+.right-panel { width: 360px; display: flex; flex-direction: column; flex-shrink: 0; border-left: 1px solid #eee; overflow: hidden; }
 </style>

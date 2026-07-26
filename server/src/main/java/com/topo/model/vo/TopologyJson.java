@@ -24,13 +24,14 @@ public class TopologyJson {
      */
     @Data
     public static class Device {
-        private String id;          // eNSP 内部 UUID
-        private String name;        // 设备名如 FW_HZ
-        private String model;       // 型号如 USG6000V
-        private String type;        // firewall / switch / router / pc / server / client
-        private double x;           // 画布 X 坐标
-        private double y;           // 画布 Y 坐标
-        /** 有序接口列表，索引对应 .topo 里 interfacePair 的 srcIndex/tarIndex */
+        private String id;
+        private String name;
+        private String model;
+        private String type;
+        private double x;
+        private double y;
+        private int comPort;       // Console 端口号（来自 .topo com_port 属性）
+        private String settings;    // PC/Client IP配置(-simpc_ip/-simpc_mask/-simpc_gateway)
         private List<String> interfaces;
     }
 
