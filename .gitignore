@@ -24,6 +24,10 @@ tu/
 *.env
 *.local
 
+# 配置文件（含API密钥等敏感信息）
+application.yml
+application.properties
+
 # 日志
 *.log
 logs/
