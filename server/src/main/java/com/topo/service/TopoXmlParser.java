@@ -3,7 +3,6 @@ package com.topo.service;
 import com.topo.model.vo.TopologyJson;
 import org.springframework.stereotype.Component;
 import org.w3c.dom.*;
-import org.xml.sax.InputSource;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -95,35 +94,6 @@ public class TopoXmlParser {
             }
         }
         return topo;
-    }
-
-    /** 从字节流中移除 encoding="UNICODE"（ASCII 或 UTF-16LE 格式） */
-    private byte[] removeEncodingDeclaration(byte[] bytes) {
-        // ASCII: encoding="UNICODE"
-        byte[] ascii = "encoding=\"UNICODE\"".getBytes(StandardCharsets.US_ASCII);
-        // UTF-16LE: e\0n\0c\0o\0d\0i\0n\0g\0=\0\"\0U\0N\0I\0C\0O\0D\0E\0\"\0
-        byte[] utf16le = "encoding=\"UNICODE\"".getBytes(StandardCharsets.UTF_16LE);
-        for (byte[] marker : new byte[][]{ascii, utf16le}) {
-            int idx = indexOf(bytes, marker);
-            if (idx >= 0) {
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
-                out.write(bytes, 0, idx);
-                out.write(bytes, idx + marker.length, bytes.length - idx - marker.length);
-                return out.toByteArray();
-            }
-        }
-        return bytes;
-    }
-
-    private int indexOf(byte[] haystack, byte[] needle) {
-        for (int i = 0; i <= haystack.length - needle.length; i++) {
-            boolean match = true;
-            for (int j = 0; j < needle.length; j++) {
-                if (haystack[i + j] != needle[j]) { match = false; break; }
-            }
-            if (match) return i;
-        }
-        return -1;
     }
 
     private void extractInterfaces(Element ifEl, List<String> ifaces) {

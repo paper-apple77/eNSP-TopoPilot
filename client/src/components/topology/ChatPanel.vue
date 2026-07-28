@@ -67,7 +67,7 @@ async function send() {
           if (update.addDevices) cur.devices.push(...update.addDevices)
           if (update.addConnections) cur.connections.push(...update.addConnections)
           emit('topoUpdate', JSON.stringify(cur))
-        } catch(e) {}
+        } catch {}
       }
       return
     }
@@ -128,14 +128,13 @@ async function send() {
 .chat-panel { flex: 1; display: flex; flex-direction: column; background: #fff; min-height: 0; }
 .chat-header { padding: 12px 16px; font-weight: 600; font-size: 14px; border-bottom: 1px solid #eee; flex-shrink: 0; }
 .chat-body { flex: 1; overflow-y: auto; padding: 12px; min-height: 0; }
-.chat-input { flex-shrink: 0; }
 .chat-empty { color: #999; text-align: center; padding-top: 60px; font-size: 13px; }
 .msg { margin-bottom: 12px; }
 .msg-label { font-size: 11px; color: #999; margin-bottom: 4px; }
 .msg-content pre { margin: 0; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
 .msg.user .msg-content pre { background: #EEF2FF; }
 .msg.assistant .msg-content pre { background: #F5F5F5; }
-.chat-input { display: flex; flex-direction: column; padding: 10px; border-top: 1px solid #eee; gap: 8px; }
+.chat-input { flex-shrink: 0; display: flex; flex-direction: column; padding: 10px; border-top: 1px solid #eee; gap: 8px; }
 .chat-input textarea { width: 100%; border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; font-size: 13px; outline: none; resize: vertical; font-family: inherit; min-height: 40px; box-sizing: border-box; }
 .chat-input button { align-self: flex-end; padding: 8px 14px; background: #409EFF; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
 .chat-input button:disabled { background: #ccc; cursor: not-allowed; }

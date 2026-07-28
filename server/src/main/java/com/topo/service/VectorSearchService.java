@@ -4,7 +4,6 @@ import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * 设备感知的向量化语义检索引擎
@@ -57,10 +56,6 @@ public class VectorSearchService {
         }
     }
 
-    /** 语义搜索（不过滤机型） */
-    public List<String> search(String query, int topK) {
-        return search(query, topK, Set.of());
-    }
 
     /**
      * 设备感知搜索

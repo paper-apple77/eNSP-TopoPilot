@@ -25,11 +25,6 @@ public class ConversationHistory {
         }
     }
 
-    /** @deprecated 用带 mode 的方法 */
-    public void add(Long userId, Long topologyId, String userMsg, String assistantMsg) {
-        add(userId, topologyId, userMsg, assistantMsg, "default");
-    }
-
     public List<Map<String, String>> getHistory(Long userId, Long topologyId, String mode) {
         List<Map.Entry<String, String>> history = store.get(key(userId, mode));
         if (history == null) return List.of();
@@ -41,16 +36,7 @@ public class ConversationHistory {
         return messages;
     }
 
-    /** @deprecated 用带 mode 的方法 */
-    public List<Map<String, String>> getHistory(Long userId, Long topologyId) {
-        return getHistory(userId, topologyId, "default");
-    }
-
     public void clear(Long userId, Long topologyId, String mode) {
         store.remove(key(userId, mode));
-    }
-
-    public void clear(Long userId, Long topologyId) {
-        store.remove(key(userId, "default"));
     }
 }

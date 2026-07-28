@@ -4,8 +4,6 @@ import com.topo.model.vo.TopologyJson;
 import java.util.*;
 import org.springframework.stereotype.Component;
 
-import java.util.*;
-
 /**
  * .topo XML 反写器
  *
@@ -113,14 +111,6 @@ public class TopoXmlWriter {
             }
             sb.append("            </slot>\n");
         }
-    }
-
-    /** 防火墙接口定义 */
-    private static class IfaceSlot { String slot, card, index; IfaceSlot(String s, String c, String i) { slot=s; card=c; index=i; } }
-    private static final List<IfaceSlot> FIREWALL_IFACES = new ArrayList<>();
-    static {
-        FIREWALL_IFACES.add(new IfaceSlot("0", "0", "0")); // GE0/0/0
-        for (int i = 0; i <= 6; i++) FIREWALL_IFACES.add(new IfaceSlot("1", "0", String.valueOf(i)));
     }
 
     private int getInterfaceIndex(TopologyJson topo, String deviceName, String ifaceName) {

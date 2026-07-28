@@ -359,7 +359,7 @@ public class ChatController {
             for (int port : ports) {
                 String name = portToName.getOrDefault(port, "Device_" + port);
                 String pwd = userPwds.get(name);
-                if (telnetService.connect(name, port, "admin", pwd)) {
+                if (telnetService.connect(name, "127.0.0.1", port, "admin", pwd)) {
                     String info = telnetService.queryDeviceInfo(name);
                     if (info == null || info.length() < 50) {
                         System.out.println("[ConnectAll] 跳过 " + name + ":" + port + " - 无有效回显");
@@ -444,7 +444,7 @@ public class ChatController {
         if ("new".equals(option)) {
             ok = telnetService.connectNewFirewall(name, port);
         } else {
-            ok = telnetService.connect(name, port, "admin", pwd);
+            ok = telnetService.connect(name, "127.0.0.1", port, "admin", pwd);
         }
 
         if (ok) {
@@ -490,8 +490,6 @@ public class ChatController {
         }
     }
 
-    /** 解析 .topo 中 PC 的 settings 属性（格式: -simpc_ip:192.168.1.1 -simpc_mask:255.255.255.0 -simpc_gateway:192.168.1.254） */
-    /** 修复 AI 输出配置命令时丢失的空格 */
     /** 该命令是否会进入子视图 */
     private boolean isSubViewEntry(String cmd) {
         if (cmd == null) return false;

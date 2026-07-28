@@ -7,7 +7,6 @@ import org.springframework.stereotype.Service;
 
 import java.io.InputStream;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * 结构化命令知识库
@@ -110,12 +109,6 @@ public class CommandKnowledgeService {
         // 允许缩进子命令和注释行
         if (t.matches("^\\s{1,4}\\S+.*")) return true;
         return false;
-    }
-
-    /** 获取型号的注意事项 */
-    public String getNotes(String model) {
-        ModelKnowledge mk = models.get(model);
-        return mk != null ? mk.notes : null;
     }
 
     /** 获取型号能力摘要文本 */

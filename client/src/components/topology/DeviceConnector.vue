@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref } from 'vue'
 import { scanDevices, connectAllDevices, disconnectDevice, getConnectedDevices } from '../../api/index'
 import request from '../../api/request'
 import { ElMessage } from 'element-plus'
@@ -192,8 +192,8 @@ async function handleDisconnect(name: string) {
 .tag-x { border: none; background: none; color: #f56c6c; cursor: pointer; font-size: 12px; padding: 0 2px; line-height: 1; }
 .tag-x:hover { color: #e03; }
 .auth-section { margin-top: 10px; border-top: 1px solid #eee; padding-top: 8px; }
+.list-title { font-size: 12px; font-weight: 500; margin-bottom: 6px; }
 .auth-item { display: flex; align-items: center; gap: 6px; padding: 4px 0; font-size: 12px; }
-.pwd-input { flex: 1; border: 1px solid #ddd; border-radius: 3px; padding: 3px 6px; font-size: 12px; width: 120px; }
 .btn-auth { padding: 3px 10px; border: 1px solid #E6A23C; background: #fff; color: #E6A23C; border-radius: 3px; cursor: pointer; font-size: 11px; }
 .btn-auth:hover { background: #E6A23C; color: #fff; }
 .auth-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; z-index: 1000; }

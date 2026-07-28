@@ -54,11 +54,6 @@ public class TelnetService {
 
     public List<Integer> scanDevices() { return scanDevices(DEFAULT_SCAN_START, DEFAULT_SCAN_END); }
 
-    public boolean connect(String deviceName, int port) { return connect(deviceName, "127.0.0.1", port, null, null); }
-    public boolean connect(String deviceName, int port, String user, String pwd) { return connect(deviceName, "127.0.0.1", port, user, pwd); }
-
-    public boolean connect(String deviceName, String host, int port) { return connect(deviceName, host, port, null, null); }
-
     public boolean connect(String deviceName, String host, int port, String user, String pwd) {
         if (sessions.containsKey(deviceName)) disconnect(deviceName);
         try {
@@ -207,7 +202,6 @@ public class TelnetService {
     }
 
     public String getCachedConfig(String deviceName) { return cachedConfig.get(deviceName); }
-    public void clearCache() { cachedConfig.clear(); }
     public Set<String> getAndClearPwdChanged() {
         Set<String> copy = new HashSet<>(pwdChangedDevices);
         pwdChangedDevices.clear(); return copy;
