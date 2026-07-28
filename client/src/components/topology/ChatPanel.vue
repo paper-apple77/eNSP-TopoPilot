@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, nextTick } from 'vue'
+import { ref, nextTick, computed, watch } from 'vue'
 
-const props = defineProps<{ topologyJson?: string; mode?: string }>()
+const props = defineProps<{ topologyJson?: string; mode?: string; connectedDevices?: string[] }>()
 const emit = defineEmits<{ topoUpdate: [json: string] }>()
 
 interface Message { role: 'user' | 'assistant'; content: string }
@@ -10,6 +10,30 @@ const messages = ref<Message[]>([])
 const input = ref('')
 const loading = ref(false)
 const chatBody = ref<HTMLDivElement>()
+const selectedDevices = ref<string[]>([])
+
+const devices = computed(() => {
+  try {
+    const topo = JSON.parse(props.topologyJson || '{"devices":[]}')
+    return (topo.devices || []).map((d: any) => d.name)
+  } catch { return [] }
+})
+
+// 已连接设备名集合（快速查找）
+const connectedSet = computed(() => new Set(props.connectedDevices || []))
+
+// 自动选中新连接的设备
+watch(() => props.connectedDevices, (list) => {
+  if (list && list.length > 0) {
+    selectedDevices.value = [...list]
+  }
+})
+
+const emptyText = computed(() =>
+  props.mode === 'design'
+    ? '👋 描述你想要的网络拓扑，AI 帮你设计'
+    : '👋 连接 eNSP 后在这里对话生成配置命令'
+)
 
 async function send() {
   const text = input.value.trim()
@@ -24,7 +48,10 @@ async function send() {
   let rawContent = ''
 
   const token = localStorage.getItem('token')
-  const url = `http://localhost:8080/api/chat/stream?message=${encodeURIComponent(text)}&topologyJson=${encodeURIComponent(props.topologyJson || '{}')}&mode=${props.mode || 'connect'}&token=${encodeURIComponent(token || '')}`
+  const devicesParam = selectedDevices.value.length > 0
+    ? `&devices=${encodeURIComponent(selectedDevices.value.join(','))}`
+    : ''
+  const url = `http://localhost:8080/api/chat/stream?message=${encodeURIComponent(text)}&topologyJson=${encodeURIComponent(props.topologyJson || '{}')}&mode=${props.mode || 'connect'}&token=${encodeURIComponent(token || '')}${devicesParam}`
 
   const es = new EventSource(url)
   es.onmessage = (event) => {
@@ -44,7 +71,6 @@ async function send() {
       }
       return
     }
-    // 跳过 JSON 工具调用块
     if (event.data.startsWith('{') && (event.data.includes('tool_call') || event.data.includes('reasoning'))) return
     rawContent += event.data.replace(/\\n/g, '\n')
     assistantMsg.content = rawContent.replace(/`{2,}topo[\s\S]*?(?:`{2,}|$)/g, '')
@@ -54,10 +80,6 @@ async function send() {
   }
   es.onerror = () => { es.close(); loading.value = false }
 }
-
-function scrollBottom() {
-  if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight
-}
 </script>
 
 <template>
@@ -65,7 +87,7 @@ function scrollBottom() {
     <div class="chat-header">AI 配置助手</div>
     <div ref="chatBody" class="chat-body">
       <div v-if="messages.length === 0" class="chat-empty">
-        👋 连接 eNSP 后在这里对话生成配置命令
+        {{ emptyText }}
       </div>
       <div v-for="(m, i) in messages" :key="i" :class="['msg', m.role]">
         <div class="msg-label">{{ m.role === 'user' ? '你' : 'AI' }}</div>
@@ -73,7 +95,30 @@ function scrollBottom() {
       </div>
     </div>
     <div class="chat-input">
-      <textarea v-model="input" placeholder="描述你想要的网络..." :disabled="loading" :rows="2" @keydown.enter.exact.prevent="send" />
+      <!-- 设备选择下拉框，仅连接模式显示 -->
+      <div v-if="mode !== 'design' && devices.length > 0" class="device-select">
+        <el-select
+          v-model="selectedDevices"
+          multiple
+          collapse-tags
+          collapse-tags-tooltip
+          placeholder="选择设备（可选，不选默认全部）"
+          size="small"
+          clearable
+        >
+          <el-option
+            v-for="d in devices"
+            :key="d"
+            :label="d"
+            :value="d"
+          >
+            <span :style="{ color: connectedSet.has(d) ? '#67c23a' : '#999' }">
+              {{ connectedSet.has(d) ? '🟢' : '⚪' }} {{ d }}
+            </span>
+          </el-option>
+        </el-select>
+      </div>
+      <textarea v-model="input" :placeholder="mode === 'design' ? '描述你想要的网络拓扑...' : '描述你想要的网络配置...'" :disabled="loading" :rows="2" @keydown.enter.exact.prevent="send" />
       <button :disabled="loading || !input.trim()" @click="send">{{ loading ? '...' : '发送' }}</button>
     </div>
   </div>
@@ -90,8 +135,9 @@ function scrollBottom() {
 .msg-content pre { margin: 0; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
 .msg.user .msg-content pre { background: #EEF2FF; }
 .msg.assistant .msg-content pre { background: #F5F5F5; }
-.chat-input { display: flex; padding: 10px; border-top: 1px solid #eee; }
-.chat-input textarea { flex: 1; border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; font-size: 13px; outline: none; resize: vertical; font-family: inherit; min-height: 40px; }
-.chat-input button { margin-left: 8px; padding: 8px 14px; background: #409EFF; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.chat-input { display: flex; flex-direction: column; padding: 10px; border-top: 1px solid #eee; gap: 8px; }
+.chat-input textarea { width: 100%; border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; font-size: 13px; outline: none; resize: vertical; font-family: inherit; min-height: 40px; box-sizing: border-box; }
+.chat-input button { align-self: flex-end; padding: 8px 14px; background: #409EFF; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
 .chat-input button:disabled { background: #ccc; cursor: not-allowed; }
+.device-select { width: 100%; }
 </style>

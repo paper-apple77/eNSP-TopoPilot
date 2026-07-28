@@ -181,6 +181,31 @@ public class TelnetService {
         return cfg;
     }
 
+    /** 轻量配置查询：用几个小命令替代 display current-configuration（缩减 20~50 倍） */
+    public String queryLightConfig(String deviceName, String deviceType) {
+        StringBuilder sb = new StringBuilder();
+        // 1. IP 接口概要（所有设备）
+        sb.append("--- ip interface brief ---\n");
+        sb.append(sendCommand(deviceName, "display ip interface brief"));
+        // 2. VLAN（交换机）
+        if ("switch".equals(deviceType)) {
+            sb.append("\n--- vlan ---\n");
+            sb.append(sendCommand(deviceName, "display vlan"));
+        }
+        // 3. 静态路由（路由器）
+        if ("router".equals(deviceType)) {
+            sb.append("\n--- static routes ---\n");
+            sb.append(sendCommand(deviceName, "display ip routing-table protocol static"));
+        }
+        // 4. 防火墙 zone（防火墙）
+        if ("firewall".equals(deviceType)) {
+            sb.append("\n--- firewall zone ---\n");
+            sb.append(sendCommand(deviceName, "display firewall zone"));
+        }
+        System.out.println("[Telnet] queryLightConfig " + deviceName + "(" + deviceType + ") → " + sb.length() + "B");
+        return sb.toString();
+    }
+
     public String getCachedConfig(String deviceName) { return cachedConfig.get(deviceName); }
     public void clearCache() { cachedConfig.clear(); }
     public Set<String> getAndClearPwdChanged() {

@@ -3,8 +3,9 @@ package com.topo.service;
 import com.topo.model.vo.TopologyJson;
 import org.springframework.stereotype.Component;
 import org.w3c.dom.*;
+import org.xml.sax.InputSource;
 import javax.xml.parsers.DocumentBuilderFactory;
-import java.io.ByteArrayInputStream;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
@@ -12,34 +13,34 @@ import java.util.*;
 public class TopoXmlParser {
 
     public TopologyJson parse(byte[] bytes) throws Exception {
-        // eNSP .topo: encoding="UNICODE" = UTF-16 LE
+        // eNSP .topo: encoding="UNICODE" 即 UTF-16 LE
         String xml;
         if (bytes.length >= 2 && bytes[0] == (byte)0xFF && bytes[1] == (byte)0xFE) {
-            // UTF-16 LE with BOM
             xml = new String(bytes, StandardCharsets.UTF_16LE);
         } else if (bytes.length >= 2 && bytes[0] == (byte)0xFE && bytes[1] == (byte)0xFF) {
-            // UTF-16 BE with BOM
             xml = new String(bytes, StandardCharsets.UTF_16BE);
         } else {
-            // Try UTF-8
-            xml = new String(bytes, StandardCharsets.UTF_8);
+            // 无 BOM：按 UTF-16LE 读，如果 XML 声明不对就试 GBK
+            xml = new String(bytes, StandardCharsets.UTF_16LE);
+            if (!xml.startsWith("<?xml") && !xml.contains("<topo")) {
+                xml = new String(bytes, java.nio.charset.Charset.forName("GBK"));
+            }
         }
-
-        // Clean: remove BOM, strip to <?xml
+        // 清理：去 BOM、去乱码前缀、替换 UNICODE 编码声明
         xml = xml.replace("﻿", "").trim();
-        if (xml.contains("UNICODE")) xml = xml.replace("encoding=\"UNICODE\"", "encoding=\"UTF-8\"");
         int start = xml.indexOf("<?xml");
         if (start > 0) xml = xml.substring(start);
-        if (start < 0) throw new RuntimeException("Invalid .topo file");
+        xml = xml.replace("encoding=\"UNICODE\"", "encoding=\"UTF-8\"");
+        if (!xml.startsWith("<?xml")) throw new RuntimeException("无法解析 .topo 文件");
 
         Document doc = DocumentBuilderFactory.newInstance()
             .newDocumentBuilder().parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
         doc.getDocumentElement().normalize();
 
+        // ... rest of parsing (same as before)
         TopologyJson topo = new TopologyJson();
         topo.setDevices(new ArrayList<>());
         topo.setConnections(new ArrayList<>());
-
         Map<String, TopologyJson.Device> devMap = new LinkedHashMap<>();
 
         NodeList devNodes = doc.getElementsByTagName("dev");
@@ -94,6 +95,35 @@ public class TopoXmlParser {
             }
         }
         return topo;
+    }
+
+    /** 从字节流中移除 encoding="UNICODE"（ASCII 或 UTF-16LE 格式） */
+    private byte[] removeEncodingDeclaration(byte[] bytes) {
+        // ASCII: encoding="UNICODE"
+        byte[] ascii = "encoding=\"UNICODE\"".getBytes(StandardCharsets.US_ASCII);
+        // UTF-16LE: e\0n\0c\0o\0d\0i\0n\0g\0=\0\"\0U\0N\0I\0C\0O\0D\0E\0\"\0
+        byte[] utf16le = "encoding=\"UNICODE\"".getBytes(StandardCharsets.UTF_16LE);
+        for (byte[] marker : new byte[][]{ascii, utf16le}) {
+            int idx = indexOf(bytes, marker);
+            if (idx >= 0) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                out.write(bytes, 0, idx);
+                out.write(bytes, idx + marker.length, bytes.length - idx - marker.length);
+                return out.toByteArray();
+            }
+        }
+        return bytes;
+    }
+
+    private int indexOf(byte[] haystack, byte[] needle) {
+        for (int i = 0; i <= haystack.length - needle.length; i++) {
+            boolean match = true;
+            for (int j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) { match = false; break; }
+            }
+            if (match) return i;
+        }
+        return -1;
     }
 
     private void extractInterfaces(Element ifEl, List<String> ifaces) {

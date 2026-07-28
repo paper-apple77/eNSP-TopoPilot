@@ -52,6 +52,7 @@ public class ChatController {
                             @RequestParam(required = false) String topologyJson,
                             @RequestParam(required = false, defaultValue = "connect") String mode,
                             @RequestParam(required = false) String token,
+                            @RequestParam(required = false) String devices,
                             HttpServletRequest request,
                             HttpServletResponse response) throws Exception {
         Long userId = (Long) request.getAttribute("userId");
@@ -108,20 +109,48 @@ public class ChatController {
                 }
             }
 
-            // 2. 设备实时配置（优先缓存，缓存空则实时查询）
-            ctx.append("\n### 设备当前运行配置\n");
+            // 2. 设备实时配置（轻量查询，用户选中设备优先）
+            // 解析用户选中的设备
+            Set<String> selectedSet = new HashSet<>();
+            if (devices != null && !devices.isBlank()) {
+                for (String d : devices.split(",")) selectedSet.add(d.trim());
+            }
+            // 设备名 → 类型映射
+            Map<String, String> deviceTypeMap = new HashMap<>();
+            for (TopologyJson.Device d : topoJson.getDevices()) deviceTypeMap.put(d.getName(), d.getType());
+            // 确定要查哪些设备：有选中则只查选中的，否则全部已连接
             var connected = telnetService.getConnectedDevices();
-            System.out.println("[Chat] 连接模式，已连接设备: " + connected);
-            for (String devName : connected) {
+            List<String> toQuery = new ArrayList<>();
+            if (!selectedSet.isEmpty()) {
+                for (String d : selectedSet) { if (connected.contains(d)) toQuery.add(d); }
+                ctx.append("\n### 用户指定关注的设备: ").append(String.join(", ", toQuery)).append("\n");
+            } else {
+                toQuery.addAll(connected);
+            }
+            System.out.println("[Chat] 连接模式，已连接:" + connected + " 选中:" + selectedSet + " 查询:" + toQuery);
+
+            ctx.append("\n### 设备当前运行配置（摘要）\n");
+            for (String devName : toQuery) {
+                String type = deviceTypeMap.getOrDefault(devName, "unknown");
+                // 优先走缓存，缓存空则轻量查询
                 String cfg = telnetService.getCachedConfig(devName);
-                if (cfg == null || cfg.isBlank() || cfg.startsWith("[错误]")) {
-                    cfg = telnetService.queryCurrentConfig(devName);
+                if (cfg != null && !cfg.isBlank() && !cfg.startsWith("[错误]")) {
+                    // 缓存里有全量配置，也截断一下避免太大
+                    if (cfg.length() > 3000) cfg = cfg.substring(0, 3000) + "\n...(截断，共" + cfg.length() + "字符)";
+                } else {
+                    cfg = telnetService.queryLightConfig(devName, type);
                 }
                 if (cfg != null && !cfg.isBlank() && !cfg.startsWith("[错误]")) {
-                    ctx.append("--- ").append(devName).append(" ---\n").append(cfg).append("\n");
+                    ctx.append("--- ").append(devName).append(" (").append(type).append(") ---\n").append(cfg).append("\n");
                 } else {
                     ctx.append("--- ").append(devName).append(" --- 出厂默认配置\n");
                 }
+            }
+            // 未连接的选中设备提示
+            if (!selectedSet.isEmpty()) {
+                List<String> offline = new ArrayList<>(selectedSet);
+                offline.removeAll(connected);
+                if (!offline.isEmpty()) ctx.append("\n⚠️ 以下设备未连接: ").append(String.join(", ", offline)).append("\n");
             }
 
             systemPrompt = systemPrompt + ctx.toString();

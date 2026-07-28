@@ -41,10 +41,14 @@ public class ToolRegistry {
             return telnetService.queryDeviceInfo(devName);
         });
 
-        // 工具 2: 查询设备当前配置
+        // 工具 2: 查询设备当前配置（结果截断防止 token 膨胀）
         executors.put("queryCurrentConfig", params -> {
             String devName = (String) params.get("device_name");
-            return telnetService.queryCurrentConfig(devName);
+            String result = telnetService.queryCurrentConfig(devName);
+            if (result != null && result.length() > 5000) {
+                result = result.substring(0, 5000) + "\n...(截断，共 " + result.length() + " 字符，用 display current-configuration | include 关键词 精确查询)";
+            }
+            return result;
         });
 
         // 工具 3: 查询可用命令

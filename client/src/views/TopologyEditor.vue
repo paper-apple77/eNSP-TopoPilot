@@ -8,6 +8,7 @@ import { ElMessage } from 'element-plus'
 
 const topologyJson = ref('{"devices":[],"connections":[]}')
 const designMode = ref(false)
+const connectedDevices = ref<string[]>([])
 
 /** 切换到智能配网 */
 function switchToConnect() {
@@ -41,6 +42,10 @@ async function handleExport() {
 
 function onCanvasChange(json: string) {
   topologyJson.value = json
+}
+
+function onConnectedChange(devices: string[]) {
+  connectedDevices.value = devices
 }
 
 function deviceCount(): number {
@@ -78,8 +83,8 @@ function deviceCount(): number {
         <TopologyCanvas :topology-json="topologyJson" @change="onCanvasChange" />
       </div>
       <div class="right-panel">
-        <DeviceConnector v-if="!designMode" :topology-json="topologyJson" @topology-update="onCanvasChange" />
-        <ChatPanel :topology-json="topologyJson" :mode="designMode ? 'design' : 'connect'" @topo-update="onCanvasChange" />
+        <DeviceConnector v-if="!designMode" :topology-json="topologyJson" @topology-update="onCanvasChange" @connected-change="onConnectedChange" />
+        <ChatPanel :key="designMode ? 'design' : 'connect'" :topology-json="topologyJson" :mode="designMode ? 'design' : 'connect'" :connected-devices="connectedDevices" @topo-update="onCanvasChange" />
       </div>
     </div>
   </div>

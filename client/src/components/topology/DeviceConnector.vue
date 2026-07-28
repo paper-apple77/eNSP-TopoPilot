@@ -5,7 +5,7 @@ import request from '../../api/request'
 import { ElMessage } from 'element-plus'
 
 const props = defineProps<{ topologyJson?: string }>()
-const emit = defineEmits<{ topologyUpdate: [json: string] }>()
+const emit = defineEmits<{ topologyUpdate: [json: string]; connectedChange: [devices: string[]] }>()
 
 const scanning = ref(false)
 const connecting = ref(false)
@@ -77,6 +77,7 @@ async function refreshConnected() {
   try {
     const res = await getConnectedDevices()
     connectedDevices.value = res.data || res.devices || []
+    emit('connectedChange', connectedDevices.value)
   } catch {}
 }
 
@@ -163,11 +164,12 @@ async function handleDisconnect(name: string) {
         </div>
       </div>
 
-      <div v-if="connectedDevices.length > 0" class="list">
-        <div v-for="d in connectedDevices" :key="d" class="item">
-          🟢 {{ d }}
-          <button @click="handleDisconnect(d)" class="disconnect">✕</button>
-        </div>
+      <!-- 已连接设备 - 紧凑标签 -->
+      <div v-if="connectedDevices.length > 0" class="connected-bar">
+        <span class="bar-label">已连接 {{ connectedDevices.length }} 台</span>
+        <span v-for="d in connectedDevices" :key="d" class="device-tag">
+          {{ d }}<button @click="handleDisconnect(d)" class="tag-x" title="断开">×</button>
+        </span>
       </div>
     </div>
   </div>
@@ -184,9 +186,11 @@ async function handleDisconnect(name: string) {
 .btn:hover { background: #f5f5f5; }
 .btn.primary:hover { background: #409EFF; color: #fff; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
-.list { margin-top: 10px; border-top: 1px solid #eee; padding-top: 8px; }
-.item { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 12px; }
-.disconnect { border: none; background: none; color: #f56c6c; cursor: pointer; font-size: 14px; }
+.connected-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #eee; }
+.bar-label { font-size: 11px; color: #999; margin-right: 2px; }
+.device-tag { display: inline-flex; align-items: center; gap: 2px; padding: 1px 6px; background: #f0f9eb; border: 1px solid #c2e7b0; border-radius: 10px; font-size: 11px; color: #67c23a; white-space: nowrap; }
+.tag-x { border: none; background: none; color: #f56c6c; cursor: pointer; font-size: 12px; padding: 0 2px; line-height: 1; }
+.tag-x:hover { color: #e03; }
 .auth-section { margin-top: 10px; border-top: 1px solid #eee; padding-top: 8px; }
 .auth-item { display: flex; align-items: center; gap: 6px; padding: 4px 0; font-size: 12px; }
 .pwd-input { flex: 1; border: 1px solid #ddd; border-radius: 3px; padding: 3px 6px; font-size: 12px; width: 120px; }
