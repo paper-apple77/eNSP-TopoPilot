@@ -2,6 +2,7 @@ package com.topo.service;
 
 import jakarta.annotation.PreDestroy;
 import org.apache.commons.net.telnet.TelnetClient;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.io.*;
@@ -28,7 +29,8 @@ public class TelnetService {
 
     public static class TelnetSession {
         public final String host; public final int port; public final String deviceName;
-        private final TelnetClient client; private final PrintWriter writer; private final BufferedReader reader;
+        public String user; public String password;
+        private final TelnetClient client; public final PrintWriter writer; public final BufferedReader reader;
         TelnetSession(String h, int p, String n, TelnetClient c, PrintWriter w, BufferedReader r) {
             host=h; port=p; deviceName=n; client=c; writer=w; reader=r;
         }
@@ -68,10 +70,9 @@ public class TelnetService {
                 new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
             TelnetSession session = new TelnetSession(host, port, deviceName, client, writer, reader);
 
-            // 等设备就绪：多次回车 + 较长等待
+            // 等设备就绪：多次回车唤醒
             Thread.sleep(1000);
-            for (int i = 0; i < 5; i++) { writer.println(""); Thread.sleep(800); }
-            // 多读几次，合并所有输出
+            for (int i = 0; i < 5; i++) { writeln(session, ""); Thread.sleep(800); }
             StringBuilder allOutput = new StringBuilder();
             for (int i = 0; i < 3; i++) {
                 allOutput.append(readAvailable(reader));
@@ -80,26 +81,50 @@ public class TelnetService {
             String welcome = allOutput.toString();
             System.out.println("[Telnet] " + deviceName + " 回显(" + welcome.length() + "B): " + welcome.substring(0, Math.min(100, welcome.length())).replace('\n',' '));
 
-            // 检测到防火墙登录
-            if (welcome.contains("Username") || welcome.contains("login") || welcome.contains("Password")) {
+            // 防火墙空闲休眠：Press ENTER 唤醒后再读登录提示
+            if (welcome.contains("Press ENTER") || welcome.contains("ENTER")) {
+                System.out.println("[Telnet] " + deviceName + " 设备休眠，按回车唤醒...");
+                writeln(session, "");
+                Thread.sleep(2000);
+                welcome = readAvailable(reader);
+                System.out.println("[Telnet] " + deviceName + " 唤醒后(" + welcome.length() + "B): " + welcome.substring(0, Math.min(100, welcome.length())).replace('\n',' '));
+            }
+
+            // 有错误但没有登录提示 → 设备彻底不可用
+            boolean hasLoginPrompt = welcome.contains("Username") || welcome.contains("login") || welcome.contains("Password");
+            boolean hasError = welcome.toLowerCase().contains("fail") || welcome.toLowerCase().contains("error:");
+            if (hasError && !hasLoginPrompt) {
+                System.out.println("[Telnet] " + deviceName + " 设备回显错误且无登录提示，放弃连接");
+                return false;
+            }
+
+            // 错误+登录提示共存 → 错误是旧的残留，登录提示说明设备可用，继续
+            if (hasError && hasLoginPrompt) {
+                System.out.println("[Telnet] " + deviceName + " 回显含旧错误+登录提示，忽略旧错误继续登录");
+            }
+
+            if (hasLoginPrompt) {
                 if (pwd == null) {
                     System.out.println("[Telnet] " + deviceName + " 需要密码认证，待用户处理");
                     return false;
                 }
                 // 用户提供了密码，直接登录
                 System.out.println("[Telnet] " + deviceName + " 用提供的密码登录...");
-                writer.println("admin");
+                writeln(session, "admin");
                 waitFor(reader, new String[]{"Password", "password"}, 5000);
-                writer.println(pwd);
+                writeln(session, pwd);
                 Thread.sleep(3000);
                 String result = readAvailable(reader);
-                if (result.contains("fail") || result.contains("incorrect") || result.contains("Error: Authentication")) {
-                    System.out.println("[Telnet] " + deviceName + " 密码错误");
+                String lower = result.toLowerCase();
+                // 正面检查：必须出现命令行提示符 >
+                if (!result.contains(">")) {
+                    System.out.println("[Telnet] " + deviceName + " 登录未成功(" + result.length() + "B): " + result.substring(0, Math.min(80, result.length())).replace('\n',' '));
                     return false;
                 }
             }
 
             // 成功后才注册
+            session.user = user; session.password = pwd;
             sessions.put(deviceName, session);
             readAvailable(reader);
             System.out.println("[Telnet] 已连接 " + deviceName + " @ " + host + ":" + port);
@@ -114,10 +139,31 @@ public class TelnetService {
         TelnetSession s = sessions.get(deviceName);
         if (s == null) return "[错误] 未连接";
         try {
-            s.writer.println(command);
-            int wait = command.startsWith("display") ? 2000 : 500;
-            Thread.sleep(wait);
-            String r = readAvailable(s.reader);
+            writeln(s, command);
+            Thread.sleep(500);
+            // 读到提示符 > 或 Error 为止，最多 20s
+            long deadline = System.currentTimeMillis() + (command.startsWith("display") ? 20000 : 8000);
+            StringBuilder result = new StringBuilder();
+            int morePages = 0;
+            while (System.currentTimeMillis() < deadline && morePages < 30) {
+                String chunk = waitFor(s.reader, new String[]{">", "Error:", "---- More ----"}, 5000);
+                result.append(chunk);
+                String r = result.toString();
+                // 命令行提示符结尾 → 命令完成
+                if (r.strip().endsWith(">") || r.strip().endsWith("]")) break;
+                // 出错
+                if (r.contains("Error:") || r.contains("Unrecognized command")) break;
+                // 分页
+                if (r.contains("---- More ----")) {
+                    s.client.getOutputStream().write(' ');
+                    s.client.getOutputStream().flush();
+                    Thread.sleep(300);
+                    morePages++;
+                    continue;
+                }
+                break;
+            }
+            String r = result.toString();
             int show = Math.min(80, r.length());
             System.out.println("[Telnet] " + deviceName + " → " + command + " → (" + r.length() + "B) " + r.substring(0, show).replace('\n',' '));
             return r.strip();
@@ -130,13 +176,19 @@ public class TelnetService {
         try {
             for (String line : commands.split("\n")) {
                 line = line.trim(); if (line.isEmpty()) continue;
-                s.writer.println(line);
+                writeln(s, line);
                 Thread.sleep(line.contains("system-view") ? 800 : 300);
             }
-            Thread.sleep(2000);
-            String r = readAvailable(s.reader);
+            Thread.sleep(3000);
+            StringBuilder r = new StringBuilder();
+            // 循环读取直到没有新数据，防止残留干扰后续命令
+            for (int i = 0; i < 3; i++) {
+                String page = readAvailable(s.reader);
+                if (page.length() > 0) r.append(page);
+                Thread.sleep(500);
+            }
             System.out.println("[Telnet] " + deviceName + " ← 批量(" + r.length() + "B)");
-            return r.strip();
+            return r.toString().strip();
         } catch (Exception e) { return "[错误] " + e.getMessage(); }
     }
 
@@ -167,6 +219,19 @@ public class TelnetService {
     }
 
     public String queryDeviceInfo(String deviceName) { return safeSend(deviceName, "display version"); }
+
+    /** 查 LLDP 邻居 */
+    public String queryLldpNeighbors(String deviceName) {
+        String result = sendCommand(deviceName, "display lldp neighbor brief");
+        // 如果没开启 LLDP，开启后再查
+        if (result.contains("not enabled") || result.contains("LLDP is not")) {
+            sendCommand(deviceName, "system-view");
+            sendCommand(deviceName, "lldp enable");
+            sendCommand(deviceName, "return");
+            result = sendCommand(deviceName, "display lldp neighbor brief");
+        }
+        return result;
+    }
 
     public String queryCurrentConfig(String deviceName) {
         safeSend(deviceName, "return");
@@ -202,6 +267,7 @@ public class TelnetService {
     }
 
     public String getCachedConfig(String deviceName) { return cachedConfig.get(deviceName); }
+    public void updateCache(String deviceName, String config) { cachedConfig.put(deviceName, config); }
     public Set<String> getAndClearPwdChanged() {
         Set<String> copy = new HashSet<>(pwdChangedDevices);
         pwdChangedDevices.clear(); return copy;
@@ -211,21 +277,26 @@ public class TelnetService {
         TelnetSession s = sessions.get(deviceName);
         if (s == null) return "[错误] 未连接";
         try {
-            s.writer.println(command);
+            writeln(s, command);
             StringBuilder full = new StringBuilder();
-            int emptyCount = 0;
+            // 先等第一批数据到达（防火墙可能需 3-5 秒）
+            for (int attempt = 0; attempt < 10; attempt++) {
+                Thread.sleep(500);
+                String first = readAvailable(s.reader);
+                if (first.length() >= 5) { full.append(first); break; }
+            }
+            if (full.length() == 0) return "[错误] 设备无响应";
+            // 翻页读取后续页
             while (true) {
+                if (full.toString().contains("---- More ----")) {
+                    s.client.getOutputStream().write(' '); s.client.getOutputStream().flush();
+                    Thread.sleep(300);
+                }
                 Thread.sleep(500);
                 String page = readAvailable(s.reader);
-                if (page.length() < 5) {
-                    if (++emptyCount > 10) break; // 10次空读，设备可能卡死了
-                    continue;
-                }
-                emptyCount = 0;
+                if (page.length() < 5) break;
                 full.append(page);
                 if (!page.contains("---- More ----")) break;
-                s.writer.print(" "); s.writer.flush();
-                Thread.sleep(300);
             }
             System.out.println("[Telnet] " + deviceName + " ← paged(" + full.length() + "B)");
             return full.toString().strip();
@@ -248,59 +319,76 @@ public class TelnetService {
                 new OutputStreamWriter(client.getOutputStream(), StandardCharsets.UTF_8), true);
             BufferedReader reader = new BufferedReader(
                 new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
+            TelnetSession session = new TelnetSession(host, port, deviceName, client, writer, reader);
 
             // 等设备就绪
             Thread.sleep(1000);
-            for (int i = 0; i < 5; i++) { writer.println(""); Thread.sleep(800); }
-            readAvailable(reader);
+            for (int i = 0; i < 5; i++) { writeln(session, ""); Thread.sleep(800); }
+            String bootOutput = readAvailable(reader);
+
+            // 防火墙休眠唤醒
+            if (bootOutput.contains("Press ENTER") || bootOutput.contains("ENTER")) {
+                System.out.println("[Telnet] " + deviceName + " 休眠，按回车唤醒...");
+                writeln(session, "");
+                Thread.sleep(2000);
+                readAvailable(reader);
+            }
 
             // Step 1: 等待登录提示，输入用户名
             waitFor(reader, new String[]{"Username", "username", "login"}, 10000);
             System.out.println("[Telnet] " + deviceName + " 输入用户名...");
-            writer.println("admin");
+            writeln(session, "admin");
             // Step 2: 等待密码提示，输入默认密码
             waitFor(reader, new String[]{"Password", "password"}, 8000);
             System.out.println("[Telnet] " + deviceName + " 输入密码...");
-            writer.println("Admin@123");
+            writeln(session, "Admin@123");
             // Step 3: 等结果
             String postLogin = waitFor(reader, new String[]{"Change now", "needs to be changed", "fail", "incorrect", "Error:", ">"}, 10000);
             System.out.println("[Telnet] 登录响应: " + postLogin.substring(0, Math.min(120, postLogin.length())).replace('\n',' '));
 
-            if (postLogin.contains("incorrect") || postLogin.contains("fail") || postLogin.contains("Error: Authentication")) {
-                System.out.println("[Telnet] " + deviceName + " 默认密码不正确");
+            // > = 已登录；Change now = 需改密（也是登录成功）；fail/error = 真失败
+            boolean needChangePwd = postLogin.contains("Change now") || postLogin.contains("needs to be changed");
+            boolean hasPrompt = postLogin.contains(">");
+            boolean hasError = postLogin.toLowerCase().contains("fail") || postLogin.toLowerCase().contains("incorrect");
+            if (!needChangePwd && !hasPrompt && hasError) {
+                System.out.println("[Telnet] " + deviceName + " 登录失败");
+                return false;
+            }
+            if (!needChangePwd && !hasPrompt && !hasError) {
+                System.out.println("[Telnet] " + deviceName + " 登录响应异常，放弃");
                 return false;
             }
 
             // Step 4: 改密码流程
             if (postLogin.contains("Change now") || postLogin.contains("needs to be changed")) {
                 System.out.println("[Telnet] " + deviceName + " 改密码...");
-                writer.println("y");
+                writeln(session, "y");
                 waitFor(reader, new String[]{"old password", "Old password"}, 8000);
-                writer.println("Admin@123");  // 旧密码
+                writeln(session, "Admin@123");  // 旧密码
                 waitFor(reader, new String[]{"new password", "New password"}, 8000);
-                writer.println("admin@123");  // 新密码
+                writeln(session, "admin@123");  // 新密码
                 waitFor(reader, new String[]{"confirm", "Confirm"}, 8000);
-                writer.println("admin@123");  // 确认
+                writeln(session, "admin@123");  // 确认
                 Thread.sleep(2000);
                 String finalResp = readAvailable(reader);
-                if (finalResp.contains("fail") || finalResp.contains("Username")) {
-                    System.out.println("[Telnet] 改密码失败");
+                if (!finalResp.contains(">")) {
+                    System.out.println("[Telnet] 改密码后未进入命令行");
                     return false;
                 }
                 System.out.println("[Telnet] " + deviceName + " 密码→admin@123");
                 pwdChangedDevices.add(deviceName);
             }
 
-            // 验证登录成功：发空行，检查是否有正常提示符
-            writer.println("");
+            // 验证：必须出现命令行提示符 >
+            writeln(session, "");
             Thread.sleep(1000);
             String verify = readAvailable(reader);
-            if (verify.contains("Username") || verify.contains("Password") || verify.contains("fail") || verify.contains("Error: Authentication")) {
-                System.out.println("[Telnet] 登录验证失败: " + verify.replace('\n',' '));
+            if (!verify.contains(">")) {
+                System.out.println("[Telnet] 登录验证失败(" + verify.length() + "B): " + verify.replace('\n',' '));
                 return false;
             }
 
-            TelnetSession session = new TelnetSession(host, port, deviceName, client, writer, reader);
+            session.user = "admin"; session.password = "admin@123";
             sessions.put(deviceName, session);
             System.out.println("[Telnet] 已连接 " + deviceName + " @ " + host + ":" + port);
             return true;
@@ -338,21 +426,94 @@ public class TelnetService {
         if (s != null) { s.disconnect(); System.out.println("[Telnet] 已断开 " + name); }
     }
 
+    /** 心跳保活：每 3 分钟对已连接设备发空回车，防止空闲超时断开 */
+    @Scheduled(fixedRate = 180000)
+    public void heartbeat() {
+        for (TelnetSession s : sessions.values()) {
+            try {
+                writeln(s, "");
+                Thread.sleep(100);
+                String resp = readAvailable(s.reader);
+                // 检查是否已掉线（出现登录提示）
+                if (resp.contains("Username") || resp.contains("login")) {
+                    System.out.println("[Telnet] " + s.deviceName + " 心跳发现已掉线，尝试重连...");
+                    tryReconnect(s);
+                }
+            } catch (Exception ignored) {}
+        }
+    }
+
+    /** 发送命令前确保连接有效，掉线则自动重登 */
+    private boolean ensureConnected(TelnetSession s) {
+        try {
+            writeln(s, "");
+            Thread.sleep(200);
+            String resp = readAvailable(s.reader);
+            if (resp.contains("Username") || resp.contains("login")) {
+                System.out.println("[Telnet] " + s.deviceName + " 会话超时，自动重登...");
+                return tryReconnect(s);
+            }
+            return true;
+        } catch (Exception e) { return false; }
+    }
+
+    private boolean tryReconnect(TelnetSession s) {
+        try {
+            String user = s.user != null ? s.user : "admin";
+            String pwd = s.password;
+            writeln(s, user);
+            waitFor(s.reader, new String[]{"Password", "password"}, 5000);
+            if (pwd == null) {
+                System.out.println("[Telnet] " + s.deviceName + " 无密码，无法重登");
+                return false;
+            }
+            writeln(s, pwd);
+            Thread.sleep(2000);
+            String result = readAvailable(s.reader);
+            if (!result.contains(">")) {
+                System.out.println("[Telnet] " + s.deviceName + " 重登失败(" + result.length() + "B)");
+                return false;
+            }
+            System.out.println("[Telnet] " + s.deviceName + " 重登成功");
+            return true;
+        } catch (Exception e) {
+            System.err.println("[Telnet] " + s.deviceName + " 重登异常: " + e.getMessage());
+            return false;
+        }
+    }
+
     @PreDestroy
     public void disconnectAll() {
         for (String name : new ArrayList<>(sessions.keySet())) disconnect(name);
     }
 
+    /** 发送一行 */
+    private void writeln(TelnetSession s, String line) throws IOException {
+        byte[] bytes = (line + "\r\n").getBytes(StandardCharsets.UTF_8);
+        s.client.getOutputStream().write(bytes);
+        s.client.getOutputStream().flush();
+        System.out.println("[Telnet-WRITE] " + s.deviceName + " ← " + line + " (" + bytes.length + "B)");
+    }
+
     private String readAvailable(BufferedReader reader) throws IOException {
         StringBuilder sb = new StringBuilder();
         long start = System.currentTimeMillis();
+        int emptyPolls = 0;
         while (System.currentTimeMillis() - start < 5000) {
             if (reader.ready()) {
                 char[] buf = new char[4096]; int n = reader.read(buf);
-                if (n > 0) { sb.append(buf, 0, n); start = System.currentTimeMillis(); }
-            } else if (sb.length() > 0) break;
+                if (n > 0) { sb.append(buf, 0, n); start = System.currentTimeMillis(); emptyPolls = 0; }
+            } else if (sb.length() > 0) {
+                emptyPolls++;
+                if (emptyPolls > 20) break; // 1s 无数据才退出
+            }
             try { Thread.sleep(50); } catch (InterruptedException e) { break; }
         }
-        return sb.toString().replaceAll("\\[[;\\d]*[A-Za-z]", "").replaceAll("\\r", "\n").replaceAll("\n{3,}", "\n\n").trim();
+        String raw = sb.toString();
+        String cleaned = raw.replaceAll("\\[[;\\d]*[A-Za-z]", "").replaceAll("\\r", "\n").replaceAll("\n{3,}", "\n\n").trim();
+        if (raw.length() > 0 && !raw.equals(cleaned) && raw.length() < 200) {
+            System.out.println("[Telnet-RAW] raw=" + raw.replace("\r","\\r").replace("\n","\\n").replace("","ESC"));
+        }
+        return cleaned;
     }
 }

@@ -12,6 +12,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.*;
 
 @RestController
 @RequestMapping("/api/chat")
@@ -44,10 +45,10 @@ public class ChatController {
         this.topoXmlWriter = topoXmlWriter;
         this.topoXmlParser = topoXmlParser;
         this.telnetService.setChatService(chatService);
-        this.toolRegistry.init(knowledgeService, configValidator);
+        this.toolRegistry.init(configValidator);
     }
 
-    @GetMapping("/stream")
+    @PostMapping("/stream")
     public void chatStream(@RequestParam String message,
                             @RequestParam(required = false) String topologyJson,
                             @RequestParam(required = false, defaultValue = "connect") String mode,
@@ -69,12 +70,14 @@ public class ChatController {
         String systemPrompt = promptBuilder.buildSystemPrompt(topoJson, message, mode);
         List<Map<String, String>> history = conversationHistory.getHistory(userId, 0L, mode);
 
-        // 直接写 response，绕过 SseEmitter
+        // 直接写 response，绕过 SseEmitter，零缓冲确保逐字输出
         response.setContentType("text/event-stream");
         response.setCharacterEncoding("UTF-8");
         response.setHeader("Cache-Control", "no-cache");
         response.setHeader("X-Accel-Buffering", "no");
+        response.setBufferSize(0);
         ServletOutputStream out = response.getOutputStream();
+        out.flush();  // 立即发送 HTTP 头
 
         // 推送命令：不调 AI，直接从历史中提取配置推送到设备
         if (!"design".equals(mode) && isPushCommand(message)) {
@@ -83,97 +86,78 @@ public class ChatController {
             return;
         }
 
-        // 连接模式：打包所有已知信息给 AI（拓扑+配置+PC IP）
-        if (!"design".equals(mode)) {
-            StringBuilder ctx = new StringBuilder();
-            ctx.append("\n## 完整网络信息（来自拓扑文件 + 设备实时查询）\n\n");
+        try {
+            // 先发思考提示
+            out.write("data:🔍 AI 正在分析...\n\n".getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            response.flushBuffer();
 
-            // 1. 拓扑结构一览
-            ctx.append("### 设备清单\n");
-            for (TopologyJson.Device d : topoJson.getDevices()) {
-                ctx.append(d.getName()).append(" | 型号:").append(d.getModel()).append(" | 类型:").append(d.getType());
-                if (d.getInterfaces() != null && !d.getInterfaces().isEmpty())
-                    ctx.append(" | 接口: ").append(String.join(", ", d.getInterfaces()));
-                // PC 的 IP 信息直接跟在设备后面
-                if (("pc".equals(d.getType()) || "client".equals(d.getType()) || "server".equals(d.getType()))
-                    && d.getSettings() != null && !d.getSettings().isBlank()) {
-                    ctx.append(" | ").append(parsePcSettings(d.getSettings()));
-                }
-                ctx.append("\n");
-            }
-            ctx.append("\n### 连线关系\n");
-            if (topoJson.getConnections() != null) {
-                for (TopologyJson.Connection c : topoJson.getConnections()) {
-                    ctx.append(c.getFromDevice()).append("(").append(c.getFromInterface()).append(") ↔ ")
-                       .append(c.getToDevice()).append("(").append(c.getToInterface()).append(")\n");
-                }
-            }
-
-            // 2. 设备实时配置（轻量查询，用户选中设备优先）
-            // 解析用户选中的设备
-            Set<String> selectedSet = new HashSet<>();
-            if (devices != null && !devices.isBlank()) {
-                for (String d : devices.split(",")) selectedSet.add(d.trim());
-            }
-            // 设备名 → 类型映射
-            Map<String, String> deviceTypeMap = new HashMap<>();
-            for (TopologyJson.Device d : topoJson.getDevices()) deviceTypeMap.put(d.getName(), d.getType());
-            // 确定要查哪些设备：有选中则只查选中的，否则全部已连接
-            var connected = telnetService.getConnectedDevices();
-            List<String> toQuery = new ArrayList<>();
-            if (!selectedSet.isEmpty()) {
-                for (String d : selectedSet) { if (connected.contains(d)) toQuery.add(d); }
-                ctx.append("\n### 用户指定关注的设备: ").append(String.join(", ", toQuery)).append("\n");
-            } else {
-                toQuery.addAll(connected);
-            }
-            System.out.println("[Chat] 连接模式，已连接:" + connected + " 选中:" + selectedSet + " 查询:" + toQuery);
-
-            ctx.append("\n### 设备当前运行配置（摘要）\n");
-            for (String devName : toQuery) {
-                String type = deviceTypeMap.getOrDefault(devName, "unknown");
-                // 优先走缓存，缓存空则轻量查询
-                String cfg = telnetService.getCachedConfig(devName);
-                if (cfg != null && !cfg.isBlank() && !cfg.startsWith("[错误]")) {
-                    // 缓存里有全量配置，也截断一下避免太大
-                    if (cfg.length() > 3000) cfg = cfg.substring(0, 3000) + "\n...(截断，共" + cfg.length() + "字符)";
-                } else {
-                    cfg = telnetService.queryLightConfig(devName, type);
-                }
-                if (cfg != null && !cfg.isBlank() && !cfg.startsWith("[错误]")) {
-                    ctx.append("--- ").append(devName).append(" (").append(type).append(") ---\n").append(cfg).append("\n");
-                } else {
-                    ctx.append("--- ").append(devName).append(" --- 出厂默认配置\n");
-                }
-            }
-            // 未连接的选中设备提示
-            if (!selectedSet.isEmpty()) {
-                List<String> offline = new ArrayList<>(selectedSet);
-                offline.removeAll(connected);
-                if (!offline.isEmpty()) ctx.append("\n⚠️ 以下设备未连接: ").append(String.join(", ", offline)).append("\n");
-            }
-
-            systemPrompt = systemPrompt + ctx.toString();
-        }
-
-        // 流式输出 AI 回复，同时收集完整文本
-        StringBuilder fullResponse = new StringBuilder();
-        chatService.chatStream(systemPrompt, history, message, chunk -> {
-            try {
+            StringBuilder fullResponse = new StringBuilder();
+            if ("design".equals(mode)) {
+            // 设计模式：直接流式对话，不调工具
+            chatService.chatStream(systemPrompt, history, message, chunk -> {
                 fullResponse.append(chunk);
-                // SSE data 不能含裸换行，转义
-                String safe = chunk.replace("\n", "\\n");
-                out.write(("data:" + safe + "\n\n").getBytes(StandardCharsets.UTF_8));
+            });
+            String safe = fullResponse.toString().replace("\n", "\\n");
+            out.write(("data:" + safe + "\n\n").getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            response.flushBuffer();
+        } else {
+            // 连接模式：Agent 自主调工具
+            try {
+                chatService.agentChat(systemPrompt, history, message, event -> {
+                    try {
+                        switch (event.type) {
+                            case "thinking" -> {
+                                out.write(("data:💭 " + event.message + "\n\n").getBytes(StandardCharsets.UTF_8));
+                                out.flush();
+                                response.flushBuffer();
+                            }
+                            case "token" -> {
+                                fullResponse.append(event.message);
+                                String safe = event.message.replace("\n", "\\n");
+                                out.write(("data:" + safe + "\n\n").getBytes(StandardCharsets.UTF_8));
+                                out.flush();
+                                response.flushBuffer();
+                            }
+                            case "tool_start" -> {
+                                String msg = "🔧 " + event.message;
+                                out.write(("data:" + msg + "\n\n").getBytes(StandardCharsets.UTF_8));
+                                out.flush();
+                                response.flushBuffer();
+                            }
+                            case "tool_result" -> {
+                                // 静默处理
+                            }
+                            case "error" -> {
+                                out.write(("data:⚠️ " + event.message + "\n\n").getBytes(StandardCharsets.UTF_8));
+                                out.flush();
+                                response.flushBuffer();
+                            }
+                            case "done" -> {
+                                System.out.println("[Agent] 完成: " + event.message);
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                });
+            } catch (Exception e) {
+                System.err.println("[Chat] Agent异常: " + e.getMessage());
+                e.printStackTrace();
+                String errMsg = "⚠️ AI 处理异常: " + e.getMessage();
+                out.write(("data:" + errMsg + "\n\n").getBytes(StandardCharsets.UTF_8));
                 out.flush();
                 response.flushBuffer();
-            } catch (Exception ignored) {}
-        });
-        out.write("data:[DONE]\n\n".getBytes(StandardCharsets.UTF_8));
-        out.flush();
+            }
+        }
+            out.write("data:[DONE]\n\n".getBytes(StandardCharsets.UTF_8));
+            out.flush();
 
-        // 保存真实 AI 回复到历史（从 fullResponse 中取，不是 "completed"）
-        String aiReply = fullResponse.length() > 0 ? fullResponse.toString() : "completed";
-        conversationHistory.add(userId, 0L, message, aiReply, mode);
+            String aiReply = fullResponse.length() > 0 ? fullResponse.toString() : "completed";
+            conversationHistory.add(userId, 0L, message, aiReply, mode);
+        } catch (Exception e) {
+            System.err.println("[Chat] SSE异常: " + e.getMessage());
+            try { out.write("data:⚠️ 系统异常，请重试\n\n".getBytes(StandardCharsets.UTF_8)); out.flush(); } catch (Exception ignored) {}
+        }
     }
 
     /** 用户消息是否表示确认推送 */
@@ -189,7 +173,6 @@ public class ChatController {
     private void pushConfigsFromHistory(Long userId, String mode, ServletOutputStream out, HttpServletResponse response) {
         List<Map<String, String>> history = conversationHistory.getHistory(userId, 0L, mode);
         if (history.isEmpty()) { sendSse(out, "无历史消息可推送", response); return; }
-        // 最后一条 assistant 消息
         String lastAiMsg = null;
         for (int i = history.size() - 1; i >= 0; i--) {
             if ("assistant".equals(history.get(i).get("role"))) {
@@ -201,16 +184,20 @@ public class ChatController {
             sendSse(out, "上一轮没有 AI 配置可推送", response); return;
         }
         sendSse(out, "正在推送配置...", response);
-        pushConfigs(lastAiMsg, out, response);
+        List<String> pushedDevices = pushConfigs(lastAiMsg, out, response);
+        // 推送后自动验证
+        if (!pushedDevices.isEmpty()) {
+            sendSse(out, "", response);
+            verifyPushResults(pushedDevices, lastAiMsg, out, response);
+        }
     }
 
-    /** 解析配置文本中的 ```config 块并推送到对应设备 */
-    private void pushConfigs(String fullResponse, ServletOutputStream out, HttpServletResponse response) {
-        // 兼容 ```config AR1 和 ```configAR1 两种写法
+    /** 解析配置文本中的 ```config 块并推送到对应设备，返回推送过的设备名列表 */
+    private List<String> pushConfigs(String fullResponse, ServletOutputStream out, HttpServletResponse response) {
         var pattern = java.util.regex.Pattern.compile(
             "```config\\s*(\\S+)\\s*\\n?([\\s\\S]*?)```");
         var matcher = pattern.matcher(fullResponse);
-        boolean pushed = false;
+        List<String> pushedDevices = new ArrayList<>();
         while (matcher.find()) {
             String devName = matcher.group(1).trim();
             String config = matcher.group(2).trim();
@@ -254,10 +241,51 @@ public class ChatController {
                 sendSse(out, "✅ " + devName + " 推送完成", response);
             }
             telnetService.queryCurrentConfig(devName);
-            pushed = true;
+            pushedDevices.add(devName);
         }
-        if (!pushed) {
+        if (pushedDevices.isEmpty()) {
             sendSse(out, "💡 未检测到配置推送。如需推送配置，请用 ```config 设备名\\n命令\\n``` 格式输出。", response);
+        }
+        return pushedDevices;
+    }
+
+    /** 推送后验证：查关键指标，交给 AI 分析是否生效 */
+    private void verifyPushResults(List<String> pushedDevices, String originalConfig,
+                                    ServletOutputStream out, HttpServletResponse response) {
+        sendSse(out, "🔍 正在验证配置...", response);
+        // 收集验证数据
+        StringBuilder verifyData = new StringBuilder();
+        for (String devName : pushedDevices) {
+            if (!telnetService.isConnected(devName)) continue;
+            verifyData.append("=== ").append(devName).append(" ===\n");
+            verifyData.append("[ip interface brief]\n");
+            verifyData.append(telnetService.sendCommand(devName, "display ip interface brief")).append("\n");
+            // 根据推送内容决定额外查什么
+            if (originalConfig.contains("ospf")) {
+                verifyData.append("[ospf peer]\n");
+                verifyData.append(telnetService.sendCommand(devName, "display ospf peer brief")).append("\n");
+            }
+            if (originalConfig.contains("vlan")) {
+                verifyData.append("[vlan]\n");
+                verifyData.append(telnetService.sendCommand(devName, "display vlan")).append("\n");
+            }
+        }
+        // 让 AI 分析
+        String prompt = "你刚推送了以下配置到设备，现在验证是否生效。根据设备回显分析每个配置项的生效情况，有问题说问题，没问题说没问题。简短报告。\n\n"
+            + "【推送的配置】\n" + originalConfig + "\n\n【设备当前状态】\n" + verifyData;
+        try {
+            chatService.chatStream(prompt, List.of(), "验证", chunk -> {
+                try {
+                    String safe = chunk.replace("\n", "\\n");
+                    out.write(("data:" + safe + "\n\n").getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                    response.flushBuffer();
+                } catch (Exception ignored) {}
+            });
+            out.write("data:[DONE]\n\n".getBytes(StandardCharsets.UTF_8));
+            out.flush();
+        } catch (Exception e) {
+            sendSse(out, "验证异常: " + e.getMessage(), response);
         }
     }
 
@@ -355,38 +383,57 @@ public class ChatController {
                 userPwds.putAll(pwds);
             }
 
-            List<DeviceInfo> devices = new ArrayList<>();
+            List<DeviceInfo> devices = Collections.synchronizedList(new ArrayList<>());
+            ExecutorService executor = Executors.newFixedThreadPool(Math.min(ports.size(), 6));
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
             for (int port : ports) {
                 String name = portToName.getOrDefault(port, "Device_" + port);
                 String pwd = userPwds.get(name);
-                if (telnetService.connect(name, "127.0.0.1", port, "admin", pwd)) {
-                    String info = telnetService.queryDeviceInfo(name);
-                    if (info == null || info.length() < 50) {
-                        System.out.println("[ConnectAll] 跳过 " + name + ":" + port + " - 无有效回显");
-                        telnetService.disconnect(name);
-                        continue;
+                futures.add(CompletableFuture.runAsync(() -> {
+                    System.out.println("[ConnectAll] " + name + ":" + port + " 开始连接 [" + Thread.currentThread().getName() + "]");
+                    if (telnetService.connect(name, "127.0.0.1", port, "admin", pwd)) {
+                        String info = telnetService.queryDeviceInfo(name);
+                        if (info == null || info.length() < 50) {
+                            System.out.println("[ConnectAll] 跳过 " + name + ":" + port + " - 无有效回显");
+                            telnetService.disconnect(name);
+                            return;
+                        }
+                        String model = extractModel(info);
+                        if (model == null) model = "unknown";
+                        String devName = name;
+                        String cfg = telnetService.queryCurrentConfig(name);
+                        String realName = extractSysname(cfg);
+                        if (devName.startsWith("Device_") && realName != null && !realName.isBlank()
+                            && !"Huawei".equalsIgnoreCase(realName)
+                            && !realName.matches("(?i)USG\\d+.*|S\\d+|AR\\d+|CE\\d+")) {
+                            telnetService.rename(devName, realName);
+                            devName = realName;
+                        }
+                        devices.add(new DeviceInfo(devName, model, port));
+                    } else {
+                        DeviceInfo d = new DeviceInfo(name, "firewall", port);
+                        d.authFailed = true;
+                        devices.add(d);
                     }
-                    String model = extractModel(info);
-                    if (model == null) model = "unknown";
-                    // 查询配置拿到真名，如果和当前名不同则重命名
-                    String cfg = telnetService.queryCurrentConfig(name);
-                    String realName = extractSysname(cfg);
-                    // 只在名字是临时名 "Device_xxx" 时才用 sysname 纠正
-                    if (name.startsWith("Device_") && realName != null && !realName.isBlank()
-                        && !"Huawei".equalsIgnoreCase(realName)
-                        && !realName.matches("(?i)USG\\d+.*|S\\d+|AR\\d+|CE\\d+")) {
-                        // rename: 断开旧名，用真名重连...不，直接改 sessions 里的 key
-                        telnetService.rename(name, realName);
-                        name = realName;
-                    }
-                    devices.add(new DeviceInfo(name, model, port));
-                } else {
-                    // 连接失败（可能是防火墙需要密码），加入列表标记
-                    DeviceInfo d = new DeviceInfo(name, "firewall", port);
-                    d.authFailed = true;
-                    devices.add(d);
+                }, executor));
+            }
+            try {
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(120, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                System.err.println("[ConnectAll] 部分设备连接超时");
+            }
+            executor.shutdown();
+
+            // LLDP 邻居匹配：用真实设备连接关系精确识别设备
+            if (body != null && body.get("topologyJson") != null) {
+                try {
+                    TopologyJson topoRef = objectMapper.readValue(body.get("topologyJson").toString(), TopologyJson.class);
+                    matchDevicesByLldp(devices, topoRef);
+                } catch (Exception e) {
+                    System.err.println("[ConnectAll] LLDP匹配异常: " + e.getMessage());
                 }
             }
+
             // 如果画布已有拓扑，不覆盖，只返回连接状态
             boolean hasExisting = body != null && body.get("topologyJson") != null;
             Map<String, Object> result = new LinkedHashMap<>();
@@ -570,5 +617,86 @@ public class ChatController {
         for (int i = 0; i < mk.interfaceCount; i++) ifs.add(mk.interfacePrefix + i);
         return ifs;
     }
+    /** LLDP 邻居匹配：用真实设备连接关系 + 型号精确识别设备 */
+    private void matchDevicesByLldp(List<DeviceInfo> devices, TopologyJson topo) {
+        if (topo.getDevices() == null || topo.getConnections() == null) return;
+        var connectedDevs = devices.stream().filter(d -> !d.authFailed).toList();
+        if (connectedDevs.size() < 2) return;
+
+        // 1. 并行查询所有设备的 LLDP 邻居
+        record LlpdSig(String name, String model, int port, Set<String> localIfaces) {}
+        List<LlpdSig> sigs = Collections.synchronizedList(new ArrayList<>());
+        List<CompletableFuture<Void>> lldpFutures = new ArrayList<>();
+        for (DeviceInfo dev : connectedDevs) {
+            lldpFutures.add(CompletableFuture.runAsync(() -> {
+                try {
+                    String lldpRaw = telnetService.queryLldpNeighbors(dev.name);
+                    Set<String> ifaces = parseLldpInterfaces(lldpRaw);
+                    String model = dev.model != null ? dev.model : "unknown";
+                    sigs.add(new LlpdSig(dev.name, model, dev.port, ifaces));
+                    System.out.println("[LLDP] " + dev.name + ":" + dev.port + " model=" + model + " ifaces=" + ifaces);
+                } catch (Exception e) {
+                    System.err.println("[LLDP] " + dev.name + " 查询失败: " + e.getMessage());
+                }
+            }));
+        }
+        try { CompletableFuture.allOf(lldpFutures.toArray(new CompletableFuture[0])).get(60, TimeUnit.SECONDS); }
+        catch (Exception e) { System.err.println("[LLDP] 并行查询超时"); }
+
+        // 2. 为每个 .topo 设备收集签名：{名称, 型号, 连接用的接口集合}
+        record TopoSig(String name, String model, Set<String> localIfaces) {}
+        List<TopoSig> topoSigs = new ArrayList<>();
+        for (TopologyJson.Device d : topo.getDevices()) {
+            if ("pc".equals(d.getType()) || "client".equals(d.getType()) || "server".equals(d.getType())) continue;
+            Set<String> ifaces = new HashSet<>();
+            for (TopologyJson.Connection c : topo.getConnections()) {
+                if (c.getFromDevice().equals(d.getName())) ifaces.add(c.getFromInterface());
+                if (c.getToDevice().equals(d.getName())) ifaces.add(c.getToInterface());
+            }
+            topoSigs.add(new TopoSig(d.getName(), d.getModel(), ifaces));
+        }
+
+        // 3. 匹配：型号相同 + 接口重叠最多
+        for (LlpdSig sig : sigs) {
+            TopoSig bestMatch = null;
+            int bestScore = 0;
+            for (TopoSig ts : topoSigs) {
+                if (ts.model == null || !ts.model.equals(sig.model)) continue;
+                // 计算接口名重叠数
+                Set<String> overlap = new HashSet<>(sig.localIfaces);
+                overlap.retainAll(ts.localIfaces);
+                if (overlap.size() > bestScore) {
+                    bestScore = overlap.size();
+                    bestMatch = ts;
+                }
+            }
+            // 至少有一个接口匹配才重命名
+            if (bestMatch != null && bestScore > 0 && !bestMatch.name.equals(sig.name)) {
+                System.out.println("[LLDP] 匹配: 端口" + sig.port + "(" + sig.name + "," + sig.model + ") → " + bestMatch.name + " (接口匹配" + bestScore + "个)");
+                telnetService.rename(sig.name, bestMatch.name);
+                // 更新 devices 列表中的名字
+                for (DeviceInfo d : devices) {
+                    if (d.name.equals(sig.name)) { d.name = bestMatch.name; break; }
+                }
+            }
+        }
+    }
+
+    /** 解析 display lldp neighbor brief 输出，提取本端接口名集合 */
+    private Set<String> parseLldpInterfaces(String lldpOutput) {
+        Set<String> ifaces = new HashSet<>();
+        if (lldpOutput == null || lldpOutput.isBlank()) return ifaces;
+        for (String line : lldpOutput.split("\n")) {
+            line = line.trim();
+            if (line.isEmpty() || line.startsWith("Local") || line.startsWith("--") || line.contains("Error:")) continue;
+            // 格式: GE0/0/1      USG6000V1                GE1/0/1                   116
+            String[] parts = line.split("\\s+");
+            if (parts.length >= 1 && parts[0].contains("/")) {
+                ifaces.add(parts[0]);
+            }
+        }
+        return ifaces;
+    }
+
     private static class DeviceInfo { String name, model; int port; boolean authFailed; DeviceInfo(String n, String m, int p) { name=n; model=m; port=p; } }
 }

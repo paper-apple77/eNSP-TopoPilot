@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, computed, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 
 const props = defineProps<{ topologyJson?: string; mode?: string; connectedDevices?: string[] }>()
 const emit = defineEmits<{ topoUpdate: [json: string] }>()
@@ -42,43 +42,88 @@ async function send() {
   input.value = ''
   loading.value = true
 
-  const assistantMsg: Message = { role: 'assistant', content: '' }
-  messages.value.push(assistantMsg)
-  const msgIdx = messages.value.length - 1
+  const msgIdx = messages.value.length
+  messages.value.push({ role: 'assistant', content: '⏳ 等待中...' })
   let rawContent = ''
 
   const token = localStorage.getItem('token')
   const devicesParam = selectedDevices.value.length > 0
-    ? `&devices=${encodeURIComponent(selectedDevices.value.join(','))}`
+    ? selectedDevices.value.join(',')
     : ''
-  const url = `http://localhost:8080/api/chat/stream?message=${encodeURIComponent(text)}&topologyJson=${encodeURIComponent(props.topologyJson || '{}')}&mode=${props.mode || 'connect'}&token=${encodeURIComponent(token || '')}${devicesParam}`
 
-  const es = new EventSource(url)
-  es.onmessage = (event) => {
-    if (!event.data) return
-    if (event.data === '[DONE]') {
-      es.close(); loading.value = false
-      const match = rawContent.match(/`{2,}topo\s*([\s\S]*?)`{2,}/)
-      if (match) {
-        assistantMsg.content = rawContent.replace(/`{2,}topo[\s\S]*?`{2,}/, '✅ 拓扑已更新')
-        try {
-          const update = JSON.parse(match[1].trim())
-          const cur = JSON.parse(props.topologyJson || '{"devices":[],"connections":[]}')
-          if (update.addDevices) cur.devices.push(...update.addDevices)
-          if (update.addConnections) cur.connections.push(...update.addConnections)
-          emit('topoUpdate', JSON.stringify(cur))
-        } catch {}
-      }
-      return
-    }
-    if (event.data.startsWith('{') && (event.data.includes('tool_call') || event.data.includes('reasoning'))) return
-    rawContent += event.data.replace(/\\n/g, '\n')
-    assistantMsg.content = rawContent.replace(/`{2,}topo[\s\S]*?(?:`{2,}|$)/g, '')
-    nextTick(() => {
-      if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight
+  // POST 方式避免 URL 过长
+  const formData = new URLSearchParams()
+  formData.append('message', text)
+  formData.append('topologyJson', props.topologyJson || '{}')
+  formData.append('mode', props.mode || 'connect')
+  formData.append('token', token || '')
+  formData.append('devices', devicesParam)
+
+  try {
+    const response = await fetch('http://localhost:8080/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
     })
+    if (!response.ok) { loading.value = false; return }
+    const reader = response.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue
+        const data = line.substring(5).trim()
+        if (!data) continue
+        if (data === '[DONE]') {
+          loading.value = false
+          messages.value[msgIdx].content = rawContent.replace(/`{2,}topo[\s\S]*?(?:`{2,}|$)/g, '')
+          const match = rawContent.match(/`{2,}topo\s*([\s\S]*?)`{2,}/)
+          if (match) {
+            messages.value[msgIdx].content = rawContent.replace(/`{2,}topo[\s\S]*?`{2,}/, '✅ 拓扑已更新')
+            try {
+              const update = JSON.parse(match[1].trim())
+              const cur = JSON.parse(props.topologyJson || '{"devices":[],"connections":[]}')
+              if (update.addDevices) cur.devices.push(...update.addDevices)
+              if (update.addConnections) cur.connections.push(...update.addConnections)
+              emit('topoUpdate', JSON.stringify(cur))
+            } catch {}
+          }
+          if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight
+          return
+        }
+        if (data.startsWith('🔧')) {
+          messages.value[msgIdx].content = data
+          if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight
+          continue
+        }
+        if (data.startsWith('{') && (data.includes('tool_call') || data.includes('reasoning'))) continue
+        // 跳过 ```json 代码块中的 tool_call
+        if (data.includes('tool_call') && (data.startsWith('`') || data.startsWith('{'))) continue
+        if (data.includes('🔍')) {
+          messages.value[msgIdx].content = data
+          continue
+        }
+        rawContent += data.replace(/\\n/g, '\n')
+        // 清理显示：去掉 ```json tool_call 块 和 ```topo 块
+        let clean = rawContent
+          .replace(/```json[\s\S]*?tool_call[\s\S]*?```/g, '')
+          .replace(/`{2,}topo[\s\S]*?(?:`{2,}|$)/g, '')
+          .replace(/\n{3,}/g, '\n\n')
+        messages.value[msgIdx].content = clean
+        if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight
+      }
+    }
+  } catch (err) {
+    console.error('[Chat] error:', err)
+  } finally {
+    loading.value = false
   }
-  es.onerror = () => { es.close(); loading.value = false }
 }
 </script>
 

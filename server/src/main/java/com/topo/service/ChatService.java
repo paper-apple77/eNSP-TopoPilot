@@ -12,9 +12,8 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.function.Consumer;
 
 /**
@@ -33,7 +32,7 @@ public class ChatService {
     private String model;
 
     /** Function Calling 最大循环轮数 */
-    private static final int MAX_TOOL_ROUNDS = 3;
+    private static final int MAX_TOOL_ROUNDS = 12;
 
     public ChatService(ObjectMapper objectMapper, ToolRegistry toolRegistry) {
         this.objectMapper = objectMapper;
@@ -64,45 +63,49 @@ public class ChatService {
             });
 
             fullResponse.append(aiOutput);
+            System.out.println("[Agent] 第" + (round + 1) + "轮 AI输出(" + aiOutput.length() + "字): " + aiOutput.substring(0, Math.min(200, aiOutput.length())).replace('\n',' '));
 
-            // 检查是否有工具调用
-            String toolCallJson = toolRegistry.extractToolCall(aiOutput);
-            if (toolCallJson == null) {
-                // 没有工具调用了，AI 认为任务完成
+            List<String> toolCalls = toolRegistry.extractAllToolCalls(aiOutput);
+            System.out.println("[Agent] 第" + (round + 1) + "轮, 发现 " + toolCalls.size() + " 个工具调用");
+            if (toolCalls.isEmpty()) {
+                if (aiOutput.isBlank()) {
+                    String fallback = "（AI 未生成回复，请重试或简化问题）";
+                    fullResponse.append(fallback);
+                    callback.accept(new AgentEvent("token", fallback, null));
+                }
                 callback.accept(new AgentEvent("done", "任务完成", fullResponse.toString()));
                 return;
             }
 
-            // 解析工具调用
-            try {
-                Map<String, Object> tcObj = objectMapper.readValue(toolCallJson, Map.class);
-                @SuppressWarnings("unchecked")
-                Map<String, Object> toolCall = (Map<String, Object>) tcObj.get("tool_call");
-                String reasoning = (String) tcObj.getOrDefault("reasoning", "");
-                if (toolCall != null) {
+            // 串行执行工具（同一设备不能并行，会互相干扰）
+            List<String> toolResults = new ArrayList<>();
+            for (String tcJson : toolCalls) {
+                try {
+                    Map<String, Object> tcObj = objectMapper.readValue(tcJson, Map.class);
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> toolCall = (Map<String, Object>) tcObj.get("tool_call");
+                    if (toolCall == null) continue;
                     String toolName = (String) toolCall.get("name");
                     @SuppressWarnings("unchecked")
                     Map<String, Object> params = (Map<String, Object>) toolCall.get("params");
 
                     callback.accept(new AgentEvent("tool_start",
-                        "🔧 调用工具: " + toolName + " → " + reasoning, null));
+                        "查询 " + params.getOrDefault("device_name", "") + " (" + toolName + ")", null));
 
                     String toolResult = toolRegistry.execute(toolName, params);
-
-                    callback.accept(new AgentEvent("tool_result",
-                        "📋 " + toolName + " 结果: " + toolResult.substring(0, Math.min(200, toolResult.length())), null));
-
-                    // 把 AI 输出和工具结果加入对话
-                    messages.add(Map.of("role", "assistant", "content", aiOutput));
-                    messages.add(Map.of("role", "user",
-                        "content", "工具 [" + toolName + "] 执行结果:\n" + toolResult +
-                        "\n\n请基于此结果继续推理。如果任务完成，直接输出配置命令，不要再调工具。"));
+                    toolResults.add("--- [" + toolName + " " + params.getOrDefault("device_name", "") + "] ---\n" + toolResult);
+                    System.out.println("[Agent] " + toolName + " → " + (toolResult != null ? toolResult.length() + "B" : "null"));
+                } catch (Exception e) {
+                    System.err.println("[Agent] 工具执行失败: " + e.getMessage());
                 }
-            } catch (Exception e) {
-                System.err.println("[Agent] 工具调用解析失败: " + e.getMessage());
-                callback.accept(new AgentEvent("error", "工具调用解析失败: " + e.getMessage(), null));
-                break;
             }
+
+            // 所有工具结果一次性反馈给 AI
+            String combinedResults = String.join("\n\n", toolResults);
+            messages.add(Map.of("role", "assistant", "content", aiOutput));
+            messages.add(Map.of("role", "user",
+                "content", "工具执行结果:\n" + combinedResults +
+                "\n\n请基于结果继续。如果任务完成，输出配置命令，不要再调工具。"));
         }
 
         callback.accept(new AgentEvent("done", "达到最大轮数，任务可能未完成", fullResponse.toString()));
@@ -188,7 +191,7 @@ public class ChatService {
         }
     }
 
-    /** 调用 DeepSeek API，流式返回完整响应 */
+    /** 调用 DeepSeek API，流式返回完整响应（逐字节读，确保 streaming） */
     private String callDeepSeek(List<Map<String, String>> messages, Consumer<String> onToken) throws Exception {
         Map<String, Object> body = Map.of(
             "model", model,
@@ -208,29 +211,46 @@ public class ChatService {
 
         try (OutputStream os = conn.getOutputStream()) {
             os.write(json.getBytes(StandardCharsets.UTF_8));
+            os.flush();
+        }
+
+        System.out.println("[DeepSeek] 请求, messages=" + messages.size() + "条, body=" + json.length() + "B");
+        int code = conn.getResponseCode();
+        System.out.println("[DeepSeek] 响应码: " + code);
+        if (code != 200) {
+            try (InputStream es = conn.getErrorStream()) {
+                if (es != null) System.err.println("[DeepSeek] HTTP " + code + ": " + new String(es.readAllBytes(), StandardCharsets.UTF_8));
+            }
+            throw new IOException("DeepSeek API returned " + code);
         }
 
         StringBuilder full = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.contains("[DONE]")) break;
-                if (line.startsWith("data: ")) {
-                    try {
-                        String data = line.substring(6);
-                        Map<String, Object> chunk = objectMapper.readValue(data, Map.class);
-                        @SuppressWarnings("unchecked")
-                        List<Map<String, Object>> choices = (List<Map<String, Object>>) chunk.get("choices");
-                        if (choices != null && !choices.isEmpty()) {
-                            Map<String, Object> delta = (Map<String, Object>) choices.get(0).get("delta");
-                            if (delta != null && delta.get("content") != null) {
-                                String token = delta.get("content").toString();
-                                full.append(token);
-                                onToken.accept(token);
+        try (InputStream is = conn.getInputStream()) {
+            java.io.ByteArrayOutputStream lineBuf = new java.io.ByteArrayOutputStream();
+            int b;
+            while ((b = is.read()) != -1) {
+                if (b == '\n') {
+                    String line = lineBuf.toString("UTF-8");
+                    lineBuf.reset();
+                    if (line.contains("[DONE]")) break;
+                    if (line.startsWith("data: ")) {
+                        try {
+                            String data = line.substring(6);
+                            Map<String, Object> chunk = objectMapper.readValue(data, Map.class);
+                            @SuppressWarnings("unchecked")
+                            List<Map<String, Object>> choices = (List<Map<String, Object>>) chunk.get("choices");
+                            if (choices != null && !choices.isEmpty()) {
+                                Map<String, Object> delta = (Map<String, Object>) choices.get(0).get("delta");
+                                if (delta != null && delta.get("content") != null) {
+                                    String token = delta.get("content").toString();
+                                    full.append(token);
+                                    onToken.accept(token);
+                                }
                             }
-                        }
-                    } catch (Exception ignored) {}
+                        } catch (Exception ignored) {}
+                    }
+                } else {
+                    lineBuf.write(b);
                 }
             }
         }

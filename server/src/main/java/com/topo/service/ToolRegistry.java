@@ -31,7 +31,7 @@ public class ToolRegistry {
     private final Map<String, ToolExecutor> executors = new LinkedHashMap<>();
     private boolean initialized = false;
 
-    public void init(CommandKnowledgeService knowledgeService, ConfigValidator validator) {
+    public void init(ConfigValidator validator) {
         if (initialized) return;
         initialized = true;
 
@@ -41,14 +41,12 @@ public class ToolRegistry {
             return telnetService.queryDeviceInfo(devName);
         });
 
-        // 工具 2: 查询设备当前配置（结果截断防止 token 膨胀）
+        // 工具 2: 查询设备当前配置（优先缓存）
         executors.put("queryCurrentConfig", params -> {
             String devName = (String) params.get("device_name");
-            String result = telnetService.queryCurrentConfig(devName);
-            if (result != null && result.length() > 5000) {
-                result = result.substring(0, 5000) + "\n...(截断，共 " + result.length() + " 字符，用 display current-configuration | include 关键词 精确查询)";
-            }
-            return result;
+            String cached = telnetService.getCachedConfig(devName);
+            if (cached != null && !cached.isBlank() && !cached.startsWith("[错误]")) return cached;
+            return telnetService.queryCurrentConfig(devName);
         });
 
         // 工具 3: 查询可用命令
@@ -66,17 +64,19 @@ public class ToolRegistry {
             return r.contains("Error") || r.contains("Unrecognized") ? "命令不存在" : "命令存在";
         });
 
-        // 工具 5: 发送配置命令
+        // 工具 5: 发送配置命令（原样发送，AI 自己管理视图，有报错自己修正）
         executors.put("sendConfig", params -> {
             String devName = (String) params.get("device_name");
             @SuppressWarnings("unchecked")
             List<String> commands = (List<String>) params.get("commands");
-            StringBuilder sb = new StringBuilder();
+            StringBuilder batch = new StringBuilder();
             for (String cmd : commands) {
-                String result = telnetService.sendCommand(devName, cmd);
-                sb.append("[").append(sanitizeResult(result)).append("] ");
+                cmd = fixCommandSpacing(cmd.trim());
+                if (cmd.isEmpty() || cmd.startsWith("#") || cmd.startsWith("!")) continue;
+                batch.append(cmd).append("\n");
             }
-            return sb.toString().strip();
+            String result = telnetService.sendCommands(devName, batch.toString());
+            return result.isBlank() ? "推送完成(无回显)" : result.substring(0, Math.min(800, result.length()));
         });
 
         // 工具 6: 发送单条命令
@@ -86,10 +86,22 @@ public class ToolRegistry {
             return telnetService.sendCommand(devName, cmd);
         });
 
-        // 工具 7: 查询知识库
-        executors.put("searchKnowledge", params -> {
-            return "知识库查询结果";
-        });
+    }
+
+    private String fixCommandSpacing(String cmd) {
+        return cmd
+            .replaceAll("(?i)ipaddress(\\d)", "ip address $1")
+            .replaceAll("(?i)^sysname(\\S)", "sysname $1")
+            .replaceAll("(?i)^interface(Gigabit)", "interface $1")
+            .replaceAll("(?i)undoshutdown", "undo shutdown")
+            .replaceAll("(?i)firewallzone", "firewall zone ")
+            .replaceAll("(?i)addinterface", "add interface ")
+            .replaceAll("(?i)^ospf(\\d)", "ospf $1")
+            .replaceAll("(?i)^acl(\\d)", "acl $1")
+            .replaceAll("(?i)portlink-type", "port link-type ")
+            .replaceAll("(?i)portdefaultvlan", "port default vlan ")
+            .replaceAll("(?i)porttrunkallow-pass", "port trunk allow-pass ")
+            .replaceAll("(?i)vlanbatch", "vlan batch ");
     }
 
     private String sanitizeResult(String result) {
@@ -109,21 +121,31 @@ public class ToolRegistry {
         }
     }
 
-    /** 检查响应中是否包含工具调用 */
-    public String extractToolCall(String aiOutput) {
-        if (aiOutput == null) return null;
-        int start = aiOutput.indexOf("\"tool_call\"");
-        if (start < 0) return null;
-        // 找到包含 tool_call 的完整 JSON 对象
-        int braceStart = aiOutput.lastIndexOf('{', start);
-        if (braceStart < 0) return null;
-        int depth = 0;
-        int braceEnd = -1;
-        for (int i = braceStart; i < aiOutput.length(); i++) {
-            if (aiOutput.charAt(i) == '{') depth++;
-            else if (aiOutput.charAt(i) == '}') { depth--; if (depth == 0) { braceEnd = i + 1; break; } }
+    /** 提取所有工具调用（支持一次返回多个） */
+    public List<String> extractAllToolCalls(String aiOutput) {
+        List<String> result = new ArrayList<>();
+        if (aiOutput == null) return result;
+        int searchFrom = 0;
+        while (true) {
+            int start = aiOutput.indexOf("\"tool_call\"", searchFrom);
+            if (start < 0) break;
+            int braceStart = aiOutput.lastIndexOf('{', start);
+            if (braceStart < 0 || braceStart < searchFrom) { searchFrom = start + 1; continue; }
+            int depth = 0, braceEnd = -1;
+            for (int i = braceStart; i < aiOutput.length(); i++) {
+                if (aiOutput.charAt(i) == '{') depth++;
+                else if (aiOutput.charAt(i) == '}') { depth--; if (depth == 0) { braceEnd = i + 1; break; } }
+            }
+            if (braceEnd < 0) break;
+            result.add(aiOutput.substring(braceStart, braceEnd));
+            searchFrom = braceEnd;
         }
-        if (braceEnd < 0) return null;
-        return aiOutput.substring(braceStart, braceEnd);
+        return result;
+    }
+
+    /** 检查响应中是否包含工具调用（兼容旧接口） */
+    public String extractToolCall(String aiOutput) {
+        List<String> all = extractAllToolCalls(aiOutput);
+        return all.isEmpty() ? null : all.get(0);
     }
 }
