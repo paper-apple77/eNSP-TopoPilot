@@ -24,6 +24,7 @@ const input = ref('')
 const loading = ref(false)
 const chatBody = ref<HTMLDivElement>()
 const selectedDevices = ref<string[]>([])
+let abortCtrl: AbortController | null = null
 
 const devices = computed(() => {
   try {
@@ -58,6 +59,7 @@ async function send() {
   const msgIdx = messages.value.length
   messages.value.push({ role: 'assistant', content: '⏳ 等待中...' })
   let rawContent = ''
+  const statusLines: string[] = []
 
   const token = localStorage.getItem('token')
   const devicesParam = selectedDevices.value.length > 0
@@ -72,11 +74,13 @@ async function send() {
   formData.append('token', token || '')
   formData.append('devices', devicesParam)
 
+  abortCtrl = new AbortController()
   try {
     const response = await fetch('http://localhost:8080/api/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: formData.toString()
+      body: formData.toString(),
+      signal: abortCtrl.signal
     })
     if (!response.ok) { loading.value = false; return }
     const reader = response.body!.getReader()
@@ -93,38 +97,48 @@ async function send() {
         if (!line.startsWith('data:')) continue
         const data = line.substring(5).trim()
         if (!data) continue
+        // 状态提示累积显示，不覆盖内容
+        if (data.startsWith('💭') || data.startsWith('🔧') || data.includes('🔍')) {
+          if (!statusLines.includes(data)) statusLines.push(data)
+          const display = statusLines.join('\n') + (rawContent ? '\n\n' + rawContent : '')
+          messages.value[msgIdx].content = display
+          if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight
+          continue
+        }
         if (data === '[DONE]') {
           loading.value = false
-          messages.value[msgIdx].content = rawContent.replace(/`{2,}topo[\s\S]*?(?:`{2,}|$)/g, '')
+          let final = statusLines.join('\n') + '\n\n' + rawContent
+          final = final
+            .replace(/```json[\s\S]*?tool_call[\s\S]*?```/g, '')
+            .replace(/`{2,}topo[\s\S]*?(?:`{2,}|$)/g, '')
+            .replace(/\n{3,}/g, '\n\n')
           const match = rawContent.match(/`{2,}topo\s*([\s\S]*?)`{2,}/)
           if (match) {
-            messages.value[msgIdx].content = rawContent.replace(/`{2,}topo[\s\S]*?`{2,}/, '✅ 拓扑已更新')
             try {
               const update = JSON.parse(match[1].trim())
-              const cur = JSON.parse(props.topologyJson || '{"devices":[],"connections":[]}')
-              if (update.addDevices) cur.devices.push(...update.addDevices)
-              if (update.addConnections) cur.connections.push(...update.addConnections)
+              let cur = { devices: [] as any[], connections: [] as any[] }
+              if (update.clear) {
+                // 全量替换
+                cur.devices = update.addDevices || []
+                cur.connections = update.addConnections || []
+              } else {
+                cur = JSON.parse(props.topologyJson || '{"devices":[],"connections":[]}')
+                if (update.addDevices) cur.devices.push(...update.addDevices)
+                if (update.addConnections) cur.connections.push(...update.addConnections)
+              }
               emit('topoUpdate', JSON.stringify(cur))
+              final = final.replace(/`{2,}topo[\s\S]*?`{2,}/, '✅ 拓扑已更新')
             } catch {}
           }
+          messages.value[msgIdx].content = final
           if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight
           return
         }
-        if (data.startsWith('🔧')) {
-          messages.value[msgIdx].content = data
-          if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight
-          continue
-        }
         if (data.startsWith('{') && (data.includes('tool_call') || data.includes('reasoning'))) continue
-        // 跳过 ```json 代码块中的 tool_call
         if (data.includes('tool_call') && (data.startsWith('`') || data.startsWith('{'))) continue
-        if (data.includes('🔍')) {
-          messages.value[msgIdx].content = data
-          continue
-        }
         rawContent += data.replace(/\\n/g, '\n')
-        // 清理显示：去掉 ```json tool_call 块 和 ```topo 块
-        let clean = rawContent
+        let clean = statusLines.join('\n') + '\n\n' + rawContent
+        clean = clean
           .replace(/```json[\s\S]*?tool_call[\s\S]*?```/g, '')
           .replace(/`{2,}topo[\s\S]*?(?:`{2,}|$)/g, '')
           .replace(/\n{3,}/g, '\n\n')
@@ -132,11 +146,21 @@ async function send() {
         if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight
       }
     }
-  } catch (err) {
-    console.error('[Chat] error:', err)
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      messages.value[msgIdx].content = (statusLines.join('\n') + '\n\n' + rawContent + '\n\n⚠️ 已手动停止').trim()
+    } else {
+      console.error('[Chat] error:', err)
+    }
   } finally {
     loading.value = false
+    abortCtrl = null
   }
+}
+
+function stop() {
+  abortCtrl?.abort()
+  loading.value = false
 }
 </script>
 
@@ -177,7 +201,8 @@ async function send() {
         </el-select>
       </div>
       <textarea v-model="input" :placeholder="mode === 'design' ? '描述你想要的网络拓扑...' : '描述你想要的网络配置...'" :disabled="loading" :rows="2" @keydown.enter.exact.prevent="send" />
-      <button :disabled="loading || !input.trim()" @click="send">{{ loading ? '...' : '发送' }}</button>
+      <button :disabled="!loading && !input.trim()" @click="send" v-if="!loading">{{ '发送' }}</button>
+      <button @click="stop" v-if="loading" style="background:#f56c6c">⏹ 停止</button>
     </div>
   </div>
 </template>

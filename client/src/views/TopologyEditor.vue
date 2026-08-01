@@ -1,14 +1,23 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { useRouter } from 'vue-router'
 import TopologyCanvas from '../components/topology/TopologyCanvas.vue'
 import ChatPanel from '../components/topology/ChatPanel.vue'
 import DeviceConnector from '../components/topology/DeviceConnector.vue'
 import { exportTopo } from '../api/index'
+import { useUserStore } from '../store/user'
 import { ElMessage } from 'element-plus'
 
+const router = useRouter()
+const userStore = useUserStore()
 const topologyJson = ref('{"devices":[],"connections":[]}')
 const designMode = ref(false)
 const connectedDevices = ref<string[]>([])
+
+async function handleLogout() {
+  await userStore.logout()
+  router.push('/login')
+}
 
 /** 切换到智能配网 */
 function switchToConnect() {
@@ -73,6 +82,9 @@ function deviceCount(): number {
         <el-tag v-if="deviceCount() > 0" type="info" size="small">{{ deviceCount() }} 台设备</el-tag>
         <el-button v-if="designMode && deviceCount() > 0" @click="handleExport" type="success" plain size="small">
           📤 导出 .topo
+        </el-button>
+        <el-button @click="handleLogout" type="danger" plain size="small">
+          🚪 退出
         </el-button>
       </div>
     </header>

@@ -68,6 +68,19 @@ public class ChatController {
         }
 
         String systemPrompt = promptBuilder.buildSystemPrompt(topoJson, message, mode);
+        // 连接模式：注入缓存中的轻量摘要，AI 无需重复查询
+        if (!"design".equals(mode)) {
+            StringBuilder cacheCtx = new StringBuilder();
+            for (String devName : telnetService.getConnectedDevices()) {
+                String cached = telnetService.getCachedConfig(devName);
+                if (cached != null && !cached.isBlank() && !cached.startsWith("[错误]")) {
+                    cacheCtx.append("\n【").append(devName).append("】\n").append(cached).append("\n");
+                }
+            }
+            if (cacheCtx.length() > 0) {
+                systemPrompt += "\n\n" + cacheCtx + "\n以上是设备当前运行状态。如需细节再用 sendCommand 查询。";
+            }
+        }
         List<Map<String, String>> history = conversationHistory.getHistory(userId, 0L, mode);
 
         // 直接写 response，绕过 SseEmitter，零缓冲确保逐字输出
@@ -403,8 +416,13 @@ public class ChatController {
                         String model = extractModel(info);
                         if (model == null) model = "unknown";
                         String devName = name;
-                        String cfg = telnetService.queryCurrentConfig(name);
-                        String realName = extractSysname(cfg);
+                        // 用轻量摘要替代全量配置（快 5-10 倍，AI 直接用）
+                        String devType = inferType(model);
+                        String cfg = telnetService.queryLightConfig(name, devType);
+                        telnetService.updateCache(name, cfg);
+                        // 快速查 sysname 用于设备重命名
+                        String sysInfo = telnetService.sendCommand(name, "display current-configuration | include sysname");
+                        String realName = extractSysname(sysInfo);
                         if (devName.startsWith("Device_") && realName != null && !realName.isBlank()
                             && !"Huawei".equalsIgnoreCase(realName)
                             && !realName.matches("(?i)USG\\d+.*|S\\d+|AR\\d+|CE\\d+")) {
@@ -619,24 +637,24 @@ public class ChatController {
         for (int i = 0; i < mk.interfaceCount; i++) ifs.add(mk.interfacePrefix + i);
         return ifs;
     }
-    /** LLDP 邻居匹配：用真实设备连接关系 + 型号精确识别设备 */
+    /** LLDP 邻居匹配：用邻居关系+型号精确识别设备 */
     private void matchDevicesByLldp(List<DeviceInfo> devices, TopologyJson topo) {
         if (topo.getDevices() == null || topo.getConnections() == null) return;
         var connectedDevs = devices.stream().filter(d -> !d.authFailed).toList();
         if (connectedDevs.size() < 2) return;
 
-        // 1. 并行查询所有设备的 LLDP 邻居
-        record LlpdSig(String name, String model, int port, Set<String> localIfaces) {}
+        // LLDP 签名: {名称, 型号, 端口, 连接列表(本端接口, 邻居接口)}
+        record LlpdSig(String name, String model, int port, Map<String,String> links) {}
         List<LlpdSig> sigs = Collections.synchronizedList(new ArrayList<>());
         List<CompletableFuture<Void>> lldpFutures = new ArrayList<>();
         for (DeviceInfo dev : connectedDevs) {
             lldpFutures.add(CompletableFuture.runAsync(() -> {
                 try {
                     String lldpRaw = telnetService.queryLldpNeighbors(dev.name);
-                    Set<String> ifaces = parseLldpInterfaces(lldpRaw);
+                    Map<String,String> links = parseLldpLinks(lldpRaw);
                     String model = dev.model != null ? dev.model : "unknown";
-                    sigs.add(new LlpdSig(dev.name, model, dev.port, ifaces));
-                    System.out.println("[LLDP] " + dev.name + ":" + dev.port + " model=" + model + " ifaces=" + ifaces);
+                    sigs.add(new LlpdSig(dev.name, model, dev.port, links));
+                    System.out.println("[LLDP] " + dev.name + ":" + dev.port + " model=" + model + " links=" + links);
                 } catch (Exception e) {
                     System.err.println("[LLDP] " + dev.name + " 查询失败: " + e.getMessage());
                 }
@@ -645,38 +663,44 @@ public class ChatController {
         try { CompletableFuture.allOf(lldpFutures.toArray(new CompletableFuture[0])).get(60, TimeUnit.SECONDS); }
         catch (Exception e) { System.err.println("[LLDP] 并行查询超时"); }
 
-        // 2. 为每个 .topo 设备收集签名：{名称, 型号, 连接用的接口集合}
-        record TopoSig(String name, String model, Set<String> localIfaces) {}
+        // .topo 签名: {名称, 型号, 连接列表(本端接口, 对方设备名+接口)}
+        record TopoSig(String name, String model, Map<String,String> links) {}
         List<TopoSig> topoSigs = new ArrayList<>();
         for (TopologyJson.Device d : topo.getDevices()) {
             if ("pc".equals(d.getType()) || "client".equals(d.getType()) || "server".equals(d.getType())) continue;
-            Set<String> ifaces = new HashSet<>();
+            Map<String,String> links = new LinkedHashMap<>();
             for (TopologyJson.Connection c : topo.getConnections()) {
-                if (c.getFromDevice().equals(d.getName())) ifaces.add(c.getFromInterface());
-                if (c.getToDevice().equals(d.getName())) ifaces.add(c.getToInterface());
+                if (c.getFromDevice().equals(d.getName()))
+                    links.put(c.getFromInterface(), c.getToDevice() + "/" + c.getToInterface());
+                if (c.getToDevice().equals(d.getName()))
+                    links.put(c.getToInterface(), c.getFromDevice() + "/" + c.getFromInterface());
             }
-            topoSigs.add(new TopoSig(d.getName(), d.getModel(), ifaces));
+            topoSigs.add(new TopoSig(d.getName(), d.getModel(), links));
         }
 
-        // 3. 匹配：型号相同 + 接口重叠最多
+        // 匹配: 型号相同 + 邻居接口重叠
+        Set<String> usedNames = new HashSet<>();
         for (LlpdSig sig : sigs) {
             TopoSig bestMatch = null;
             int bestScore = 0;
             for (TopoSig ts : topoSigs) {
+                if (usedNames.contains(ts.name)) continue;
                 if (ts.model == null || !ts.model.equals(sig.model)) continue;
-                // 计算接口名重叠数
-                Set<String> overlap = new HashSet<>(sig.localIfaces);
-                overlap.retainAll(ts.localIfaces);
-                if (overlap.size() > bestScore) {
-                    bestScore = overlap.size();
-                    bestMatch = ts;
+                // 计算邻居接口匹配数
+                int score = 0;
+                for (Map.Entry<String,String> e : sig.links.entrySet()) {
+                    String localIface = e.getKey();
+                    String remoteIface = e.getValue();
+                    String tsRemote = ts.links.get(localIface);
+                    if (tsRemote != null && tsRemote.contains(remoteIface)) score += 2;
+                    else if (ts.links.containsKey(localIface)) score += 1;
                 }
+                if (score > bestScore) { bestScore = score; bestMatch = ts; }
             }
-            // 至少有一个接口匹配才重命名
             if (bestMatch != null && bestScore > 0 && !bestMatch.name.equals(sig.name)) {
-                System.out.println("[LLDP] 匹配: 端口" + sig.port + "(" + sig.name + "," + sig.model + ") → " + bestMatch.name + " (接口匹配" + bestScore + "个)");
+                System.out.println("[LLDP] 匹配: 端口" + sig.port + "(" + sig.name + "," + sig.model + ") → " + bestMatch.name + " (score=" + bestScore + ")");
                 telnetService.rename(sig.name, bestMatch.name);
-                // 更新 devices 列表中的名字
+                usedNames.add(bestMatch.name);
                 for (DeviceInfo d : devices) {
                     if (d.name.equals(sig.name)) { d.name = bestMatch.name; break; }
                 }
@@ -684,20 +708,20 @@ public class ChatController {
         }
     }
 
-    /** 解析 display lldp neighbor brief 输出，提取本端接口名集合 */
-    private Set<String> parseLldpInterfaces(String lldpOutput) {
-        Set<String> ifaces = new HashSet<>();
-        if (lldpOutput == null || lldpOutput.isBlank()) return ifaces;
+    /** 解析 display lldp neighbor brief: {本端接口 → 邻居接口} */
+    private Map<String,String> parseLldpLinks(String lldpOutput) {
+        Map<String,String> links = new LinkedHashMap<>();
+        if (lldpOutput == null || lldpOutput.isBlank()) return links;
         for (String line : lldpOutput.split("\n")) {
             line = line.trim();
             if (line.isEmpty() || line.startsWith("Local") || line.startsWith("--") || line.contains("Error:")) continue;
             // 格式: GE0/0/1      USG6000V1                GE1/0/1                   116
             String[] parts = line.split("\\s+");
-            if (parts.length >= 1 && parts[0].contains("/")) {
-                ifaces.add(parts[0]);
+            if (parts.length >= 3 && parts[0].contains("/") && parts[2].contains("/")) {
+                links.put(parts[0], parts[2]); // 本端接口 → 邻居接口
             }
         }
-        return ifaces;
+        return links;
     }
 
     private static class DeviceInfo { String name, model; int port; boolean authFailed; DeviceInfo(String n, String m, int p) { name=n; model=m; port=p; } }

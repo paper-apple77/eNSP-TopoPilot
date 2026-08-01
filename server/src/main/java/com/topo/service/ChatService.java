@@ -31,8 +31,8 @@ public class ChatService {
     @Value("${deepseek.model:deepseek-chat}")
     private String model;
 
-    /** Function Calling 最大循环轮数 */
-    private static final int MAX_TOOL_ROUNDS = 12;
+    /** Function Calling 最大循环轮数（0 = 无限制） */
+    private static final int MAX_TOOL_ROUNDS = 0;
 
     public ChatService(ObjectMapper objectMapper, ToolRegistry toolRegistry) {
         this.objectMapper = objectMapper;
@@ -55,7 +55,9 @@ public class ChatService {
 
         StringBuilder fullResponse = new StringBuilder();
 
-        for (int round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        int round = 0;
+        int maxRounds = MAX_TOOL_ROUNDS > 0 ? MAX_TOOL_ROUNDS : Integer.MAX_VALUE;
+        for (; round < maxRounds; round++) {
             callback.accept(new AgentEvent("thinking", "AI 思考中... (第" + (round + 1) + "轮)", null));
 
             String aiOutput = callDeepSeek(messages, chunk -> {
@@ -100,12 +102,10 @@ public class ChatService {
                 }
             }
 
-            // 所有工具结果一次性反馈给 AI
+            // 所有工具结果一次性反馈给 AI，不截断
             String combinedResults = String.join("\n\n", toolResults);
             messages.add(Map.of("role", "assistant", "content", aiOutput));
-            messages.add(Map.of("role", "user",
-                "content", "工具执行结果:\n" + combinedResults +
-                "\n\n请基于结果继续。如果任务完成，输出配置命令，不要再调工具。"));
+            messages.add(Map.of("role", "user", "content", "工具结果:\n" + combinedResults));
         }
 
         callback.accept(new AgentEvent("done", "达到最大轮数，任务可能未完成", fullResponse.toString()));
@@ -159,6 +159,7 @@ public class ChatService {
             java.io.ByteArrayOutputStream lineBuf = new java.io.ByteArrayOutputStream();
             long firstTokenAt = 0;
             int tokenCount = 0;
+            String finishReason = "unknown";
             int b;
             while ((b = is.read()) != -1) {
                 if (b == '\n') {
@@ -172,7 +173,9 @@ public class ChatService {
                             @SuppressWarnings("unchecked")
                             List<Map<String, Object>> choices = (List<Map<String, Object>>) chunk.get("choices");
                             if (choices != null && !choices.isEmpty()) {
-                                Map<String, Object> delta = (Map<String, Object>) choices.get(0).get("delta");
+                                Map<String, Object> choice = choices.get(0);
+                                if (choice.get("finish_reason") != null) finishReason = choice.get("finish_reason").toString();
+                                Map<String, Object> delta = (Map<String, Object>) choice.get("delta");
                                 if (delta != null && delta.get("content") != null) {
                                     String token = delta.get("content").toString();
                                     if (firstTokenAt == 0) firstTokenAt = System.currentTimeMillis();
@@ -186,6 +189,7 @@ public class ChatService {
                     lineBuf.write(b);
                 }
             }
+            if (tokenCount == 0) System.out.println("[SSE] 空响应 finish_reason=" + finishReason);
             long elapsed = firstTokenAt > 0 ? System.currentTimeMillis() - firstTokenAt : 0;
             System.out.println("[SSE] 收到 " + tokenCount + " 个 token，首个 token 之后耗时 " + elapsed + "ms");
         }
@@ -225,6 +229,7 @@ public class ChatService {
         }
 
         StringBuilder full = new StringBuilder();
+        String finishReason = "unknown";
         try (InputStream is = conn.getInputStream()) {
             java.io.ByteArrayOutputStream lineBuf = new java.io.ByteArrayOutputStream();
             int b;
@@ -240,7 +245,9 @@ public class ChatService {
                             @SuppressWarnings("unchecked")
                             List<Map<String, Object>> choices = (List<Map<String, Object>>) chunk.get("choices");
                             if (choices != null && !choices.isEmpty()) {
-                                Map<String, Object> delta = (Map<String, Object>) choices.get(0).get("delta");
+                                Map<String, Object> choice = choices.get(0);
+                                if (choice.get("finish_reason") != null) finishReason = choice.get("finish_reason").toString();
+                                Map<String, Object> delta = (Map<String, Object>) choice.get("delta");
                                 if (delta != null && delta.get("content") != null) {
                                     String token = delta.get("content").toString();
                                     full.append(token);
@@ -253,6 +260,9 @@ public class ChatService {
                     lineBuf.write(b);
                 }
             }
+        }
+        if (full.length() == 0) {
+            System.out.println("[DeepSeek] 空响应 finish_reason=" + finishReason);
         }
         return full.toString();
     }

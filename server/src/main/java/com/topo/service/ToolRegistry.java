@@ -76,7 +76,7 @@ public class ToolRegistry {
                 batch.append(cmd).append("\n");
             }
             String result = telnetService.sendCommands(devName, batch.toString());
-            return result.isBlank() ? "推送完成(无回显)" : result.substring(0, Math.min(800, result.length()));
+            return result.isBlank() ? "推送完成(无回显)" : result;
         });
 
         // 工具 6: 发送单条命令

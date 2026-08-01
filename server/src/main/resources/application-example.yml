@@ -11,4 +11,4 @@ spring:
 
 deepseek:
   api-key: 你的DeepSeek_API_Key
-  model: deepseek-v4-pro
+  model: deepseek-chat

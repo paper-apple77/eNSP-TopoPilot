@@ -72,11 +72,14 @@ public class PromptBuilder {
 
         // 行为规范
         sb.append("【核心工作流：精准查询→分析→推送→验证→修正→总结】\n");
-        sb.append("1. 第1-2轮就把所有需要的信息一次性查完，不要分太多轮！\n");
-        sb.append("2. 接口IP: sendCommand(device_name, 'display ip interface brief')\n");
-        sb.append("3. 安全区域: sendCommand(device_name, 'display zone')\n");
-        sb.append("4. 路由: sendCommand(device_name, 'display ip routing-table')\n");
-        sb.append("5. 每个设备尽可能在一次工具调用中查完所有需要的信息\n");
+        sb.append("【重要限制】只能 Telnet 配置路由器/交换机/防火墙！PC/Server/Client 没有 Telnet！\n");
+        sb.append("  遇到 PC/Server/Client 时：列出该设备的 IP/掩码/网关，告诉用户手动配置，不要调 sendConfig！\n");
+        sb.append("【执行原则】先分析，再动手！\n");
+        sb.append("1. 第1轮仔细阅读系统提示词中的设备摘要、拓扑连线、设备能力，理解全网架构\n");
+        sb.append("2. 心里想好规划再开始：每个设备配什么接口、什么IP、什么路由\n");
+        sb.append("3. 然后逐步查询→推送→验证，做完一步确认成功再做下一步\n");
+        sb.append("4. 不要在开头画完整规划表，但心里必须有数\n");
+        sb.append("5. 所有配置真正推完了、验证通过了，才输出最终总结\n");
         sb.append("6. sendConfig 的 commands 数组第一条必须是 system-view，最后一条必须是 return\n");
         sb.append("   （禁止用 quit 结尾！quit 在用户视图下会断开 Telnet 退到登录界面）\n");
         sb.append("7. 推送后必须验证，有 Error 就分析修正\n");
@@ -96,7 +99,7 @@ public class PromptBuilder {
         sb.append("你只设计物理拓扑，不负责配置命令。配置命令由另一个配网助手负责。\n\n");
 
         if (!isEmpty) {
-            sb.append("【当前画布已有设备，请在现有基础上增量添加，不要重复已有设备】\n");
+            sb.append("【当前画布已有设备，修改时用 clear:true 输出全部设备（要保留的+要修改的），避免叠加混乱】\n");
             for (TopologyJson.Device d : topo.getDevices()) {
                 sb.append(String.format("- %s [%s] 坐标(%d,%d) 接口:%s\n",
                     d.getName(), d.getModel(), (int)d.getX(), (int)d.getY(),
@@ -133,7 +136,8 @@ public class PromptBuilder {
         sb.append("- 防火墙: FW_HZ, FW_SH, FW_BJ (带地点后缀)\n");
         sb.append("- 交换机: LSW1, LSW2, LSW3 (数字编号)\n");
         sb.append("- 路由器: AR1, AR2, Internet 等\n");
-        sb.append("- PC/Server: PC1, PC2, Server1\n\n");
+        sb.append("- PC: PC1, PC2, ...  Client: Client1, Client2, ...  Server: Server1, ...\n");
+        sb.append("- MCS: MCS1, ...  STA: STA1, ...  Cellphone: Phone1, ...\n\n");
 
         sb.append("【布局规范】\n");
         sb.append("- 核心设备(路由器/防火墙)放中央: x≈400, y≈200-300\n");
@@ -145,6 +149,7 @@ public class PromptBuilder {
         sb.append("先简要说明设计思路，然后用 ```topo 代码块输出 JSON：\n");
         sb.append("```topo\n");
         sb.append("{\n");
+        sb.append("  \"clear\": true,  ← 默认 true！只有用户明确说\"加几台设备\"时才用 false\n");
         sb.append("  \"addDevices\": [\n");
         sb.append("    {\"name\":\"设备名\",\"model\":\"型号\",\"type\":\"类型\",\"x\":坐标,\"y\":坐标,\"interfaces\":[\"按上表精确列出每个接口名\"]}\n");
         sb.append("  ],\n");

@@ -183,7 +183,7 @@ public class TelnetService {
                 writeln(s, line);
                 Thread.sleep(line.contains("system-view") ? 800 : 300);
             }
-            Thread.sleep(3000);
+            Thread.sleep(5000);
             StringBuilder r = new StringBuilder();
             // 循环读取直到没有新数据，防止残留干扰后续命令
             for (int i = 0; i < 3; i++) {
@@ -245,26 +245,22 @@ public class TelnetService {
         return cfg;
     }
 
-    /** 轻量配置查询：用几个小命令替代 display current-configuration（缩减 20~50 倍） */
+    /** 轻量配置查询：5 个命令覆盖核心网络信息 */
     public String queryLightConfig(String deviceName, String deviceType) {
         StringBuilder sb = new StringBuilder();
-        // 1. IP 接口概要（所有设备）
         sb.append("--- ip interface brief ---\n");
         sb.append(sendCommand(deviceName, "display ip interface brief"));
-        // 2. VLAN（交换机）
+        sb.append("\n--- routing-table ---\n");
+        sb.append(sendCommand(deviceName, "display ip routing-table"));
         if ("switch".equals(deviceType)) {
             sb.append("\n--- vlan ---\n");
             sb.append(sendCommand(deviceName, "display vlan"));
         }
-        // 3. 静态路由（路由器）
-        if ("router".equals(deviceType)) {
-            sb.append("\n--- static routes ---\n");
-            sb.append(sendCommand(deviceName, "display ip routing-table protocol static"));
-        }
-        // 4. 防火墙 zone（防火墙）
         if ("firewall".equals(deviceType)) {
             sb.append("\n--- firewall zone ---\n");
             sb.append(sendCommand(deviceName, "display firewall zone"));
+            sb.append("\n--- security-policy ---\n");
+            sb.append(sendCommand(deviceName, "display security-policy rule all"));
         }
         System.out.println("[Telnet] queryLightConfig " + deviceName + "(" + deviceType + ") → " + sb.length() + "B");
         return sb.toString();
@@ -421,6 +417,10 @@ public class TelnetService {
     public boolean isConnected(String name) { return sessions.containsKey(name); }
     public Set<String> getConnectedDevices() { return Collections.unmodifiableSet(sessions.keySet()); }
     public void rename(String oldName, String newName) {
+        if (sessions.containsKey(newName)) {
+            System.out.println("[Telnet] 重命名失败 " + oldName + " → " + newName + " (目标名已存在)");
+            return;
+        }
         TelnetSession s = sessions.remove(oldName);
         if (s != null) { sessions.put(newName, s); System.out.println("[Telnet] 重命名 " + oldName + " → " + newName); }
     }
@@ -491,12 +491,18 @@ public class TelnetService {
         for (String name : new ArrayList<>(sessions.keySet())) disconnect(name);
     }
 
-    /** 发送一行 */
+    /** 发送一行，逐字符写入防止 Telnet 协议吃掉首字节 */
     private void writeln(TelnetSession s, String line) throws IOException {
-        byte[] bytes = (line + "\r\n").getBytes(StandardCharsets.UTF_8);
-        s.client.getOutputStream().write(bytes);
-        s.client.getOutputStream().flush();
-        System.out.println("[Telnet-WRITE] " + s.deviceName + " ← " + line + " (" + bytes.length + "B)");
+        OutputStream os = s.client.getOutputStream();
+        for (char c : line.toCharArray()) {
+            os.write(c);
+            os.flush();
+            try { Thread.sleep(5); } catch (InterruptedException ignored) {}
+        }
+        os.write('\r');
+        os.write('\n');
+        os.flush();
+        System.out.println("[Telnet-WRITE] " + s.deviceName + " ← " + line);
     }
 
     private String readAvailable(BufferedReader reader) throws IOException {
