@@ -21,7 +21,6 @@ public class ChatController {
     private final ChatService chatService;
     private final PromptBuilder promptBuilder;
     private final ConversationHistory conversationHistory;
-    private final ConfigValidator configValidator;
     private final TelnetService telnetService;
     private final ToolRegistry toolRegistry;
     private final ObjectMapper objectMapper;
@@ -30,14 +29,13 @@ public class ChatController {
     private final TopoXmlParser topoXmlParser;
 
     public ChatController(ChatService chatService, PromptBuilder promptBuilder,
-                          ConversationHistory conversationHistory, ConfigValidator configValidator,
+                          ConversationHistory conversationHistory,
                           TelnetService telnetService, ToolRegistry toolRegistry,
                           ObjectMapper objectMapper, CommandKnowledgeService knowledgeService,
                           TopoXmlWriter topoXmlWriter, TopoXmlParser topoXmlParser) {
         this.chatService = chatService;
         this.promptBuilder = promptBuilder;
         this.conversationHistory = conversationHistory;
-        this.configValidator = configValidator;
         this.telnetService = telnetService;
         this.toolRegistry = toolRegistry;
         this.objectMapper = objectMapper;
@@ -45,7 +43,7 @@ public class ChatController {
         this.topoXmlWriter = topoXmlWriter;
         this.topoXmlParser = topoXmlParser;
         this.telnetService.setChatService(chatService);
-        this.toolRegistry.init(configValidator);
+        this.toolRegistry.init();
     }
 
     @PostMapping("/stream")
@@ -119,6 +117,7 @@ public class ChatController {
             });
         } else {
             // 连接模式：Agent 自主调工具
+            java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
             try {
                 chatService.agentChat(systemPrompt, history, message, event -> {
                     try {
@@ -141,9 +140,7 @@ public class ChatController {
                                 out.flush();
                                 response.flushBuffer();
                             }
-                            case "tool_result" -> {
-                                // 静默处理
-                            }
+                            case "tool_result" -> { /* 静默 */ }
                             case "error" -> {
                                 out.write(("data:⚠️ " + event.message + "\n\n").getBytes(StandardCharsets.UTF_8));
                                 out.flush();
@@ -153,8 +150,10 @@ public class ChatController {
                                 System.out.println("[Agent] 完成: " + event.message);
                             }
                         }
-                    } catch (Exception ignored) {}
-                });
+                    } catch (Exception e) {
+                        cancelled.set(true); // 客户端断开
+                    }
+                }, cancelled);
             } catch (Exception e) {
                 System.err.println("[Chat] Agent异常: " + e.getMessage());
                 e.printStackTrace();
@@ -599,17 +598,6 @@ public class ChatController {
             .replaceAll("(?i)vlanbatch", "vlan batch ")
             .replaceAll("(?i)^ospf(\\d)", "ospf $1")                     // ospf1 at start
             .replaceAll("(?i)^acl(\\d)", "acl $1");                      // acl3000 at start
-    }
-
-    private String parsePcSettings(String settings) {
-        if (settings == null || settings.isBlank()) return "无";
-        StringBuilder sb = new StringBuilder();
-        for (String part : settings.split(" ")) {
-            if (part.startsWith("-simpc_ip:")) sb.append("IP: ").append(part.substring(10)).append("\n");
-            else if (part.startsWith("-simpc_mask:")) sb.append("掩码: ").append(part.substring(12)).append("\n");
-            else if (part.startsWith("-simpc_gateway:")) sb.append("网关: ").append(part.substring(15)).append("\n");
-        }
-        return sb.length() > 0 ? sb.toString().trim() : settings;
     }
 
     private String extractModel(String info) {

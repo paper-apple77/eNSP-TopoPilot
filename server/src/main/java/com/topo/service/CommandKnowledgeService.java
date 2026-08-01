@@ -80,34 +80,6 @@ public class CommandKnowledgeService {
     }
 
     public ModelKnowledge getModel(String model) { return models.get(model); }
-    public Set<String> getAllModels() { return models.keySet(); }
-
-    /** 检查型号是否支持某功能 */
-    public boolean supports(String model, String feature) {
-        ModelKnowledge mk = models.get(model);
-        return mk == null || mk.capabilities.contains(feature.toLowerCase());
-    }
-
-    /** 检查型号是否禁止某功能 */
-    public boolean isForbidden(String model, String feature) {
-        ModelKnowledge mk = models.get(model);
-        return mk != null && mk.forbidden.contains(feature.toLowerCase());
-    }
-
-    /** 检查某型号的某行命令是否存在于知识库 */
-    public boolean isCommandKnown(String model, String line) {
-        ModelKnowledge mk = models.get(model);
-        if (mk == null) return true; // 未知型号放行
-        String t = line.trim().toLowerCase();
-        if (t.isEmpty() || t.startsWith("#") || t.startsWith("!")) return true;
-
-        for (String cmd : mk.cmdIndex.keySet()) {
-            if (t.startsWith(cmd)) return true;
-        }
-        // 允许缩进子命令和注释行
-        if (t.matches("^\\s{1,4}\\S+.*")) return true;
-        return false;
-    }
 
     /** 获取型号能力摘要文本 */
     public String getCapabilityText(String model) {

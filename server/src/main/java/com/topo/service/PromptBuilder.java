@@ -79,7 +79,8 @@ public class PromptBuilder {
         sb.append("2. 心里想好规划再开始：每个设备配什么接口、什么IP、什么路由\n");
         sb.append("3. 然后逐步查询→推送→验证，做完一步确认成功再做下一步\n");
         sb.append("4. 不要在开头画完整规划表，但心里必须有数\n");
-        sb.append("5. 所有配置真正推完了、验证通过了，才输出最终总结\n");
+        sb.append("5. 所有配置推完+验证通过后，输出一次最终总结（带表格），然后立即结束，不要再查！\n");
+        sb.append("   ⚠️ 禁止输出多遍总结！一次就够了！总结完就停！\n");
         sb.append("6. sendConfig 的 commands 数组第一条必须是 system-view，最后一条必须是 return\n");
         sb.append("   （禁止用 quit 结尾！quit 在用户视图下会断开 Telnet 退到登录界面）\n");
         sb.append("7. 推送后必须验证，有 Error 就分析修正\n");

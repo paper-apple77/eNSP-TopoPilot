@@ -36,7 +36,4 @@ public class ConversationHistory {
         return messages;
     }
 
-    public void clear(Long userId, Long topologyId, String mode) {
-        store.remove(key(userId, mode));
-    }
 }

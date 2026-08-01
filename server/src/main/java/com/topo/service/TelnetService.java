@@ -447,20 +447,6 @@ public class TelnetService {
         }
     }
 
-    /** 发送命令前确保连接有效，掉线则自动重登 */
-    private boolean ensureConnected(TelnetSession s) {
-        try {
-            writeln(s, "");
-            Thread.sleep(200);
-            String resp = readAvailable(s.reader);
-            if (resp.contains("Username") || resp.contains("login")) {
-                System.out.println("[Telnet] " + s.deviceName + " 会话超时，自动重登...");
-                return tryReconnect(s);
-            }
-            return true;
-        } catch (Exception e) { return false; }
-    }
-
     private boolean tryReconnect(TelnetSession s) {
         try {
             String user = s.user != null ? s.user : "admin";

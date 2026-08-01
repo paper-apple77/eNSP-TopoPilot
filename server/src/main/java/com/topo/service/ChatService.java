@@ -43,7 +43,8 @@ public class ChatService {
      * Agent 模式：AI 可以调工具，多轮循环直到完成任务
      */
     public void agentChat(String systemPrompt, List<Map<String, String>> history,
-                          String userMessage, Consumer<AgentEvent> callback) throws Exception {
+                          String userMessage, Consumer<AgentEvent> callback,
+                          java.util.concurrent.atomic.AtomicBoolean cancelled) throws Exception {
 
         List<Map<String, String>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", systemPrompt));
@@ -58,6 +59,10 @@ public class ChatService {
         int round = 0;
         int maxRounds = MAX_TOOL_ROUNDS > 0 ? MAX_TOOL_ROUNDS : Integer.MAX_VALUE;
         for (; round < maxRounds; round++) {
+            if (cancelled != null && cancelled.get()) {
+                callback.accept(new AgentEvent("done", "用户已停止", fullResponse.toString()));
+                return;
+            }
             callback.accept(new AgentEvent("thinking", "AI 思考中... (第" + (round + 1) + "轮)", null));
 
             String aiOutput = callDeepSeek(messages, chunk -> {
