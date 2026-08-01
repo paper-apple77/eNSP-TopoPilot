@@ -64,7 +64,7 @@ public class TopoXmlParser {
                 Element slot = (Element) slots.item(s);
                 NodeList ifNodes = slot.getElementsByTagName("interface");
                 for (int j = 0; j < ifNodes.getLength(); j++)
-                    extractInterfaces((Element) ifNodes.item(j), ifaces);
+                    extractInterfaces((Element) ifNodes.item(j), d.getModel(), ifaces);
             }
             d.setInterfaces(ifaces);
             topo.getDevices().add(d);
@@ -96,7 +96,10 @@ public class TopoXmlParser {
         return topo;
     }
 
-    private void extractInterfaces(Element ifEl, List<String> ifaces) {
+    /** 0/0/1 起始的设备（eNSP 跳过 0/0/0） */
+    private static final Set<String> START_AT_ONE = Set.of("S5700", "S3700", "AC6005", "AC6605", "PC", "MCS");
+
+    private void extractInterfaces(Element ifEl, String model, List<String> ifaces) {
         String cat = ifEl.getAttribute("category");
         if (!cat.isEmpty()) {
             String slot = ifEl.getAttribute("slotIndex");
@@ -107,8 +110,18 @@ public class TopoXmlParser {
         String count = ifEl.getAttribute("count");
         if (!count.isEmpty()) {
             String name = ifEl.getAttribute("interfacename");
+            int start = START_AT_ONE.contains(model) ? 1 : 0;
+            // 同 slot 内同类型接口累积编号：找已有的同前缀最大编号+1
+            String prefix = name + "0/0/";
+            for (int j = ifaces.size() - 1; j >= 0; j--) {
+                if (ifaces.get(j).startsWith(prefix)) {
+                    String num = ifaces.get(j).substring(prefix.length());
+                    try { start = Math.max(start, Integer.parseInt(num) + 1); } catch (NumberFormatException ignored) {}
+                    break;
+                }
+            }
             for (int i = 0; i < Integer.parseInt(count) && i < 48; i++)
-                ifaces.add(name + "0/0/" + i);
+                ifaces.add(prefix + (start + i));
         }
     }
 

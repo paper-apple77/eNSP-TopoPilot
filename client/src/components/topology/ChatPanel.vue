@@ -1,10 +1,23 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { marked } from 'marked'
+
+// 配置 marked
+marked.setOptions({ breaks: true, gfm: true })
 
 const props = defineProps<{ topologyJson?: string; mode?: string; connectedDevices?: string[] }>()
 const emit = defineEmits<{ topoUpdate: [json: string] }>()
 
 interface Message { role: 'user' | 'assistant'; content: string }
+
+function renderMd(text: string): string {
+  if (!text) return ''
+  // 移除 tool_call JSON 代码块
+  let cleaned = text.replace(/```json[\s\S]*?tool_call[\s\S]*?```/g, '')
+  // 移除 ```topo 块
+  cleaned = cleaned.replace(/`{2,}topo[\s\S]*?`{2,}/g, '')
+  return marked.parse(cleaned) as string
+}
 
 const messages = ref<Message[]>([])
 const input = ref('')
@@ -136,7 +149,7 @@ async function send() {
       </div>
       <div v-for="(m, i) in messages" :key="i" :class="['msg', m.role]">
         <div class="msg-label">{{ m.role === 'user' ? '你' : 'AI' }}</div>
-        <div class="msg-content"><pre>{{ m.content }}</pre></div>
+        <div class="msg-content" v-html="renderMd(m.content)"></div>
       </div>
     </div>
     <div class="chat-input">
@@ -176,9 +189,22 @@ async function send() {
 .chat-empty { color: #999; text-align: center; padding-top: 60px; font-size: 13px; }
 .msg { margin-bottom: 12px; }
 .msg-label { font-size: 11px; color: #999; margin-bottom: 4px; }
-.msg-content pre { margin: 0; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
-.msg.user .msg-content pre { background: #EEF2FF; }
-.msg.assistant .msg-content pre { background: #F5F5F5; }
+.msg-content { font-size: 13px; line-height: 1.6; }
+.msg-content :deep(p) { margin: 0 0 8px; }
+.msg-content :deep(strong) { font-weight: 600; }
+.msg-content :deep(h1), .msg-content :deep(h2), .msg-content :deep(h3) { margin: 12px 0 6px; font-weight: 600; }
+.msg-content :deep(h2) { font-size: 15px; }
+.msg-content :deep(h3) { font-size: 14px; }
+.msg-content :deep(ul), .msg-content :deep(ol) { margin: 4px 0; padding-left: 20px; }
+.msg-content :deep(li) { margin: 2px 0; }
+.msg-content :deep(table) { border-collapse: collapse; margin: 8px 0; font-size: 12px; width: 100%; }
+.msg-content :deep(th), .msg-content :deep(td) { border: 1px solid #ddd; padding: 4px 8px; text-align: left; }
+.msg-content :deep(th) { background: #f5f5f5; font-weight: 600; }
+.msg-content :deep(code) { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+.msg-content :deep(pre) { margin: 8px 0; padding: 10px; border-radius: 6px; background: #f8f8f8; font-size: 12px; white-space: pre-wrap; word-break: break-all; overflow-x: auto; }
+.msg-content :deep(blockquote) { border-left: 3px solid #409EFF; padding-left: 10px; margin: 8px 0; color: #666; }
+.msg-content :deep(hr) { border: none; border-top: 1px solid #eee; margin: 12px 0; }
+.msg.user .msg-content { }
 .chat-input { flex-shrink: 0; display: flex; flex-direction: column; padding: 10px; border-top: 1px solid #eee; gap: 8px; }
 .chat-input textarea { width: 100%; border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; font-size: 13px; outline: none; resize: vertical; font-family: inherit; min-height: 40px; box-sizing: border-box; }
 .chat-input button { align-self: flex-end; padding: 8px 14px; background: #409EFF; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }

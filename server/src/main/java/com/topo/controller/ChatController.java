@@ -94,14 +94,16 @@ public class ChatController {
 
             StringBuilder fullResponse = new StringBuilder();
             if ("design".equals(mode)) {
-            // 设计模式：直接流式对话，不调工具
+            // 设计模式：流式对话
             chatService.chatStream(systemPrompt, history, message, chunk -> {
                 fullResponse.append(chunk);
+                try {
+                    String safe = chunk.replace("\n", "\\n");
+                    out.write(("data:" + safe + "\n\n").getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                    response.flushBuffer();
+                } catch (Exception ignored) {}
             });
-            String safe = fullResponse.toString().replace("\n", "\\n");
-            out.write(("data:" + safe + "\n\n").getBytes(StandardCharsets.UTF_8));
-            out.flush();
-            response.flushBuffer();
         } else {
             // 连接模式：Agent 自主调工具
             try {

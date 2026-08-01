@@ -139,6 +139,10 @@ public class TelnetService {
         TelnetSession s = sessions.get(deviceName);
         if (s == null) return "[错误] 未连接";
         try {
+            // ? 命令用分页读取
+            if (command.trim().endsWith("?")) {
+                return sendWithPagination(deviceName, command);
+            }
             writeln(s, command);
             Thread.sleep(500);
             // 读到提示符 > 或 Error 为止，最多 20s
