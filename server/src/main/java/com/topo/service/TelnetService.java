@@ -139,29 +139,22 @@ public class TelnetService {
         TelnetSession s = sessions.get(deviceName);
         if (s == null) return "[错误] 未连接";
         try {
-            // ? 命令用分页读取
-            if (command.trim().endsWith("?")) {
-                return sendWithPagination(deviceName, command);
-            }
             writeln(s, command);
-            Thread.sleep(500);
-            // 读到提示符 > 或 Error 为止，最多 20s
-            long deadline = System.currentTimeMillis() + (command.startsWith("display") ? 20000 : 8000);
+            Thread.sleep(100);
+            // 读到提示符 > 才返回，与 sendCommands 统一
             StringBuilder result = new StringBuilder();
             int morePages = 0;
-            while (System.currentTimeMillis() < deadline && morePages < 30) {
-                String chunk = waitFor(s.reader, new String[]{">", "Error:", "---- More ----"}, 5000);
+            int timeout = command.startsWith("display") ? 20000 : 15000;
+            while (morePages < 30) {
+                String chunk = waitFor(s.reader, new String[]{">", "Error:", "---- More ----"}, timeout);
                 result.append(chunk);
                 String r = result.toString();
-                // 命令行提示符结尾 → 命令完成
                 if (r.strip().endsWith(">") || r.strip().endsWith("]")) break;
-                // 出错
                 if (r.contains("Error:") || r.contains("Unrecognized command")) break;
-                // 分页
                 if (r.contains("---- More ----")) {
                     s.client.getOutputStream().write(' ');
                     s.client.getOutputStream().flush();
-                    Thread.sleep(300);
+                    Thread.sleep(200);
                     morePages++;
                     continue;
                 }
@@ -181,15 +174,25 @@ public class TelnetService {
             for (String line : commands.split("\n")) {
                 line = line.trim(); if (line.isEmpty()) continue;
                 writeln(s, line);
-                Thread.sleep(line.contains("system-view") ? 800 : 300);
+                Thread.sleep(100); // 命令间隔 100ms 即可
             }
-            Thread.sleep(5000);
+            // 读到提示符 > 或 ] 才返回，不固定等
             StringBuilder r = new StringBuilder();
-            // 循环读取直到没有新数据，防止残留干扰后续命令
-            for (int i = 0; i < 3; i++) {
-                String page = readAvailable(s.reader);
-                if (page.length() > 0) r.append(page);
-                Thread.sleep(500);
+            int morePages = 0;
+            while (morePages < 30) {
+                String chunk = waitFor(s.reader, new String[]{">", "Error:", "---- More ----"}, 15000);
+                r.append(chunk);
+                String result = r.toString();
+                if (result.strip().endsWith(">") || result.strip().endsWith("]")) break;
+                if (result.contains("Error:") || result.contains("Unrecognized command")) break;
+                if (result.contains("---- More ----")) {
+                    s.client.getOutputStream().write(' ');
+                    s.client.getOutputStream().flush();
+                    Thread.sleep(200);
+                    morePages++;
+                    continue;
+                }
+                break;
             }
             System.out.println("[Telnet] " + deviceName + " ← 批量(" + r.length() + "B)");
             return r.toString().strip();
