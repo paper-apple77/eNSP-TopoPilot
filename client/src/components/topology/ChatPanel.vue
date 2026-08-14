@@ -5,7 +5,7 @@ import { marked } from 'marked'
 // 配置 marked
 marked.setOptions({ breaks: true, gfm: true })
 
-const props = defineProps<{ topologyJson?: string; mode?: string; connectedDevices?: string[] }>()
+const props = defineProps<{ topologyJson?: string; mode?: string; connectedDevices?: string[]; topologyId?: number | null }>()
 const emit = defineEmits<{ topoUpdate: [json: string] }>()
 
 interface Message { role: 'user' | 'assistant'; content: string }
@@ -73,10 +73,11 @@ async function send() {
   formData.append('mode', props.mode || 'connect')
   formData.append('token', token || '')
   formData.append('devices', devicesParam)
+  if (props.topologyId) formData.append('topologyId', String(props.topologyId))
 
   abortCtrl = new AbortController()
   try {
-    const response = await fetch('http://localhost:8080/api/chat/stream', {
+    const response = await fetch('/api/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: formData.toString(),

@@ -99,7 +99,9 @@ TopoPilot/
 ```bash
 cd server
 cp src/main/resources/application-example.yml src/main/resources/application.yml
-# 编辑 application.yml，填入 DeepSeek API Key 和数据库密码
+# 编辑 application.yml，填入数据库密码；DeepSeek Key 走环境变量，不写进文件
+# Windows: set DEEPSEEK_API_KEY=sk-xxx && mvn spring-boot:run
+# Mac:     export DEEPSEEK_API_KEY=sk-xxx && mvn spring-boot:run
 mvn spring-boot:run
 ```
 
@@ -108,7 +110,24 @@ mvn spring-boot:run
 cd client
 npm install
 npm run dev
+# 开发环境 /api 由 vite 代理转发到 localhost:8080，无需改代码
 ```
+
+### Docker 一键部署（Windows + Docker Desktop）
+```bash
+# 在 TopoPilot 根目录（已装 Docker Desktop）
+set DEEPSEEK_API_KEY=sk-xxx
+docker compose up -d --build
+```
+- 访问地址：http://localhost:8088（前端 nginx，自动反代 /api 到后端）
+- 四个容器：mysql（自动执行 db/init.sql 建表）、redis、backend、web
+- **eNSP 不用动**：先在本机启动 eNSP 拓扑，后端容器通过 `host.docker.internal` Telnet 本机设备端口
+- 后端环境变量（compose 已配置默认值）：
+  - `DEEPSEEK_API_KEY`：必填，DeepSeek API Key
+  - `ENSP_HOST`：eNSP 所在主机，默认 `host.docker.internal`（本机）
+- 端口冲突：8080/8088 被占用时改 docker-compose.yml 里 ports 的左边端口
+- 数据持久化：MySQL 数据在 `mysql-data` 卷；`docker compose down -v` 可完全重置
+- Swagger 文档：http://localhost:8080/swagger-ui.html
 
 ### 使用流程
 1. 在 eNSP 中打开拓扑并启动设备

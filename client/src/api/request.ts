@@ -12,7 +12,8 @@ import router from '../router'
  *      - 401 → token 过期/失效 → 清除登录态 → 跳转登录页
  */
 const request = axios.create({
-  baseURL: 'http://localhost:8080/api',
+  // 相对路径：开发环境走 vite 代理，生产环境走 nginx 反代（见 nginx.conf）
+  baseURL: '/api',
   timeout: 300000,
 })
 
@@ -37,6 +38,14 @@ request.interceptors.response.use(
   },
   (error) => {
     if (error.response?.status === 401) {
+      const url = error.config?.url || ''
+      // 登录/注册接口本身不该返回 401：可能是后端未启动/端口被占/服务异常，
+      // 弹原始错误信息，不能当成"登录已过期"踢人
+      if (url.includes('/user/login') || url.includes('/user/register')) {
+        const msg = error.response.data?.message || error.response.data?.msg
+        ElMessage.error(msg ? `登录失败：${msg}` : '登录失败，请检查后端服务')
+        return Promise.reject(error)
+      }
       localStorage.removeItem('token')
       localStorage.removeItem('email')
       router.push('/login')

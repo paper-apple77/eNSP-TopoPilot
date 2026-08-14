@@ -40,7 +40,7 @@ function handleImport() {
 async function handleScan() {
   scanning.value = true
   try {
-    const res = await scanDevices(2000, 2050)
+    const res: any = await scanDevices(2000, 2050)
     const ports = res.data || res.ports || []
     if (ports.length > 0) {
       ElMessage.success(`发现 ${ports.length} 个设备端口`)
@@ -75,7 +75,7 @@ async function handleConnectAll() {
 
 async function refreshConnected() {
   try {
-    const res = await getConnectedDevices()
+    const res: any = await getConnectedDevices()
     connectedDevices.value = res.data || res.devices || []
     emit('connectedChange', connectedDevices.value)
   } catch {}
@@ -102,7 +102,7 @@ async function handleConnectFirewall() {
   try {
     const body: any = { deviceName: dev.name, port: dev.port, option: authOption.value }
     if (authOption.value === 'existing') body.password = authPassword.value
-    const res = await request.post('/chat/devices/connect-firewall', body)
+    const res: any = await request.post('/chat/devices/connect-firewall', body)
     if (res.code === 200) {
       ElMessage.success(`${dev.name} 连接成功`)
       if (res.data?.pwdChanged) ElMessage.warning(`${dev.name} 密码已重置为 admin@123`)

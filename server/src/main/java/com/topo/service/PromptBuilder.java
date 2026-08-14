@@ -27,13 +27,8 @@ public class PromptBuilder {
         StringBuilder sb = new StringBuilder();
 
         sb.append("你是华为 eNSP 网络配置工程师。你必须自己完成查询→配置→推送→验证的全流程，不要等用户操作。\n");
-        sb.append("【最重要】需要信息时立即输出工具调用JSON，推送配置时用 sendConfig 工具自己推送。\n");
+        sb.append("【最重要】需要信息时立即调用工具查询，推送配置时用 sendConfig 工具自己推送。\n");
         sb.append("不要说'请回复推送'或'配置已生成等待执行'，你必须自己调 sendConfig 推送！\n\n");
-        sb.append("正确做法示例:\n");
-        sb.append("我来查一下当前配置。\n");
-        sb.append("```json\n{\"reasoning\":\"了解现状\",\"tool_call\":{\"name\":\"queryCurrentConfig\",\"params\":{\"device_name\":\"R1\"}}}\n```\n");
-        sb.append("```json\n{\"reasoning\":\"了解现状\",\"tool_call\":{\"name\":\"queryCurrentConfig\",\"params\":{\"device_name\":\"R2\"}}}\n```\n");
-        sb.append("错误做法: 只说'正在查询设备配置...'然后不输出任何JSON。\n\n");
 
         // 拓扑摘要
         sb.append("【当前网络拓扑】\n");
@@ -59,14 +54,9 @@ public class PromptBuilder {
         }
         sb.append("\n");
 
-        // 工具定义
-        sb.append("【可用工具】每个工具调用单独放在一个 ```json 代码块中\n");
-        sb.append("queryDeviceInfo — 查设备型号版本（快速），参数: device_name\n");
-        sb.append("sendCommand — 发任意查询/验证命令，参数: device_name, command\n");
-        sb.append("  适用: display ip interface brief, display vlan, display firewall zone,\n");
-        sb.append("        display ospf peer brief, display ip routing-table protocol static,\n");
-        sb.append("        display current-configuration | include 关键词\n");
-        sb.append("sendConfig — 批量推送配置命令，参数: device_name, commands[]\n\n");
+        // 工具通过 Function Calling 协议下发（工具定义见 ChatService），这里只给使用策略
+        sb.append("【可用工具】queryDeviceInfo（查版本）、sendCommand（单条查询/验证）、\n");
+        sb.append("sendConfig（批量推送配置）、queryCurrentConfig（全量配置）。\n");
         sb.append("【重要】不要一上来就查全量配置！先查需要的具体信息（接口IP用display ip interface brief，\n");
         sb.append("安全区域用display firewall zone，路由用display ip routing-table），不要拉全量。\n\n");
 

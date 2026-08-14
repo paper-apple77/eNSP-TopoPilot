@@ -81,6 +81,32 @@
             <version>3.11.1</version>
         </dependency>
 
+        <!-- BCrypt 密码加密（平滑迁移：老账号 MD5 验证通过后自动升级） -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+        </dependency>
+
+        <!-- Swagger 接口文档（启动后访问 http://localhost:8080/swagger-ui.html） -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>2.7.0</version>
+        </dependency>
+
+        <!-- LangChain4j (DeepSeek 走 OpenAI 兼容接口) -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-open-ai</artifactId>
+            <version>1.19.0</version>
+        </dependency>
+        <!-- AiServices 模块（DefaultToolExecutor 工具执行器） -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j</artifactId>
+            <version>1.19.0</version>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

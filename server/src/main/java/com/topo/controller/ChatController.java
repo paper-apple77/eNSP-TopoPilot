@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.topo.model.vo.TopologyJson;
 import com.topo.result.Result;
 import com.topo.service.*;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.ServletOutputStream;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -14,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 
+@Tag(name = "AI 聊天与设备管理", description = "SSE 流式对话、Telnet 设备连接、eNSP 拓扑导入导出")
 @RestController
 @RequestMapping("/api/chat")
 public class ChatController {
@@ -43,15 +46,17 @@ public class ChatController {
         this.topoXmlWriter = topoXmlWriter;
         this.topoXmlParser = topoXmlParser;
         this.telnetService.setChatService(chatService);
-        this.toolRegistry.init();
     }
 
+    @Operation(summary = "SSE 流式对话",
+            description = "mode=agent：配网模式（AI 自主调用工具查询/配置设备）；mode=design：拓扑设计模式。返回 text/event-stream")
     @PostMapping("/stream")
     public void chatStream(@RequestParam String message,
                             @RequestParam(required = false) String topologyJson,
                             @RequestParam(required = false, defaultValue = "connect") String mode,
                             @RequestParam(required = false) String token,
                             @RequestParam(required = false) String devices,
+                            @RequestParam(required = false) Long topologyId,
                             HttpServletRequest request,
                             HttpServletResponse response) throws Exception {
         Long userId = (Long) request.getAttribute("userId");
@@ -79,7 +84,12 @@ public class ChatController {
                 systemPrompt += "\n\n" + cacheCtx + "\n以上是设备当前运行状态。如需细节再用 sendCommand 查询。";
             }
         }
-        List<Map<String, String>> history = conversationHistory.getHistory(userId, 0L, mode);
+        // 注入久远对话的记忆摘要（内存窗口外的历史被 AI 压缩后的要点）
+        String memorySummary = conversationHistory.getSummary(userId, topologyId, mode);
+        if (memorySummary != null && !memorySummary.isBlank()) {
+            systemPrompt += "\n\n【历史对话摘要】（更早对话的要点，供上下文参考）\n" + memorySummary;
+        }
+        List<Map<String, String>> history = conversationHistory.getHistory(userId, topologyId, mode);
 
         // 直接写 response，绕过 SseEmitter，零缓冲确保逐字输出
         response.setContentType("text/event-stream");
@@ -92,8 +102,8 @@ public class ChatController {
 
         // 推送命令：不调 AI，直接从历史中提取配置推送到设备
         if (!"design".equals(mode) && isPushCommand(message)) {
-            pushConfigsFromHistory(userId, mode, out, response);
-            conversationHistory.add(userId, 0L, message, "配置已推送到设备", mode);
+            pushConfigsFromHistory(userId, topologyId, mode, out, response);
+            conversationHistory.add(userId, topologyId, message, "配置已推送到设备", mode);
             return;
         }
 
@@ -167,7 +177,8 @@ public class ChatController {
             out.flush();
 
             String aiReply = fullResponse.length() > 0 ? fullResponse.toString() : "completed";
-            conversationHistory.add(userId, 0L, message, aiReply, mode);
+            // 剥离工具调用 JSON 块，避免历史膨胀浪费下轮 token
+            conversationHistory.add(userId, topologyId, message, toolRegistry.stripToolCallBlocks(aiReply), mode);
         } catch (Exception e) {
             System.err.println("[Chat] SSE异常: " + e.getMessage());
             try { out.write("data:⚠️ 系统异常，请重试\n\n".getBytes(StandardCharsets.UTF_8)); out.flush(); } catch (Exception ignored) {}
@@ -184,8 +195,8 @@ public class ChatController {
     }
 
     /** 从对话历史中找到上一轮 AI 回复，提取其中的 ```config 块并推送 */
-    private void pushConfigsFromHistory(Long userId, String mode, ServletOutputStream out, HttpServletResponse response) {
-        List<Map<String, String>> history = conversationHistory.getHistory(userId, 0L, mode);
+    private void pushConfigsFromHistory(Long userId, Long topologyId, String mode, ServletOutputStream out, HttpServletResponse response) {
+        List<Map<String, String>> history = conversationHistory.getHistory(userId, topologyId, mode);
         if (history.isEmpty()) { sendSse(out, "无历史消息可推送", response); return; }
         String lastAiMsg = null;
         for (int i = history.size() - 1; i >= 0; i--) {
@@ -220,7 +231,7 @@ public class ChatController {
                 continue;
             }
             // 构建完整配置序列，跟踪当前视图自动插入 quit
-            config = fixCommandSpacing(config);
+            config = toolRegistry.fixCommandSpacing(config);
             StringBuilder batch = new StringBuilder();
             batch.append("system-view\n");
             boolean inSubView = false;
@@ -330,7 +341,7 @@ public class ChatController {
             String fixed = result.toString().trim();
             System.out.println("[AutoFix] AI 建议: " + fixed.substring(0, Math.min(100, fixed.length())));
             if (fixed.contains("NO_FIX") || fixed.isBlank() || fixed.length() < 3) return null;
-            return fixCommandSpacing(fixed);
+            return toolRegistry.fixCommandSpacing(fixed);
         } catch (Exception e) {
             System.err.println("[AutoFix] " + e.getMessage());
             return null;
@@ -346,11 +357,13 @@ public class ChatController {
     }
 
     // ===== Telnet =====
+    @Operation(summary = "扫描 eNSP 设备端口", description = "扫描本机 2000-2050 端口发现 eNSP 启动的设备")
     @GetMapping("/devices/scan")
     public Result<List<Integer>> scanDevices(@RequestParam(defaultValue = "2000") int start, @RequestParam(defaultValue = "2050") int end) {
         return Result.success(telnetService.scanDevices(start, end));
     }
 
+    @Operation(summary = "连接全部设备", description = "扫描后按 topologyJson 的 com_port 匹配设备名，并行 Telnet 连接，LLDP 邻居识别设备")
     @PostMapping("/devices/connect-all")
     public Result<Map<String, Object>> connectAll(@RequestBody(required = false) Map<String, Object> body) {
         try {
@@ -405,7 +418,7 @@ public class ChatController {
                 String pwd = userPwds.get(name);
                 futures.add(CompletableFuture.runAsync(() -> {
                     System.out.println("[ConnectAll] " + name + ":" + port + " 开始连接 [" + Thread.currentThread().getName() + "]");
-                    if (telnetService.connect(name, "127.0.0.1", port, "admin", pwd)) {
+                    if (telnetService.connect(name, telnetService.getEnspHost(), port, "admin", pwd)) {
                         String info = telnetService.queryDeviceInfo(name);
                         if (info == null || info.length() < 50) {
                             System.out.println("[ConnectAll] 跳过 " + name + ":" + port + " - 无有效回显");
@@ -499,6 +512,7 @@ public class ChatController {
         }
     }
 
+    @Operation(summary = "连接单台防火墙", description = "支持已配置密码登录（existing）和全新防火墙默认密码+改密流程（new）")
     @PostMapping("/devices/connect-firewall")
     public Result<Map<String, Object>> connectFirewall(@RequestBody Map<String, Object> body) {
         String name = (String) body.get("deviceName");
@@ -510,7 +524,7 @@ public class ChatController {
         if ("new".equals(option)) {
             ok = telnetService.connectNewFirewall(name, port);
         } else {
-            ok = telnetService.connect(name, "127.0.0.1", port, "admin", pwd);
+            ok = telnetService.connect(name, telnetService.getEnspHost(), port, "admin", pwd);
         }
 
         if (ok) {
@@ -521,17 +535,20 @@ public class ChatController {
         return Result.error("登录失败，请检查密码");
     }
 
+    @Operation(summary = "断开设备")
     @PostMapping("/devices/disconnect")
     public Result<String> disconnectDevice(@RequestBody Map<String, String> body) {
         telnetService.disconnect(body.get("deviceName"));
         return Result.success("ok");
     }
 
+    @Operation(summary = "已连接设备列表")
     @GetMapping("/devices/connected")
     public Result<List<String>> getConnected() {
         return Result.success(new ArrayList<>(telnetService.getConnectedDevices()));
     }
 
+    @Operation(summary = "导入 eNSP .topo 文件", description = "解析 UTF-16LE 编码的 .topo XML，转成拓扑 JSON 返回")
     @PostMapping("/import-topo")
     public Result<Map<String, Object>> importTopo(@RequestParam("file") MultipartFile file) {
         try {
@@ -543,6 +560,7 @@ public class ChatController {
         }
     }
 
+    @Operation(summary = "导出 eNSP .topo 文件", description = "拓扑 JSON 转 eNSP 兼容 XML（含设备接口规格/Console 端口分配）")
     @PostMapping("/export-topo")
     public Result<Map<String, Object>> exportTopo(@RequestBody Map<String, Object> body) {
         try {
@@ -584,26 +602,19 @@ public class ChatController {
             || cmd.startsWith("vrrp ") || cmd.startsWith("alias ");
     }
 
-    private String fixCommandSpacing(String config) {
-        return config
-            .replaceAll("(?i)ipaddress(\\d)", "ip address $1")           // ipaddress192.168
-            .replaceAll("(?i)^sysname(\\S)", "sysname $1")               // sysnameAR1
-            .replaceAll("(?i)^interface(Gigabit)", "interface $1")        // interfaceGigabit
-            .replaceAll("(?i)undoshutdown", "undo shutdown")              // undoshutdown
-            .replaceAll("(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})(\\d{1,3}\\.)", "$1 $2") // IP粘连
-            .replaceAll("(?i)iproute-static(\\d)", "ip route-static $1")  // iproute-static192
-            .replaceAll("(?i)portlink-type", "port link-type ")
-            .replaceAll("(?i)portdefaultvlan", "port default vlan ")
-            .replaceAll("(?i)porttrunkallow-pass", "port trunk allow-pass ")
-            .replaceAll("(?i)vlanbatch", "vlan batch ")
-            .replaceAll("(?i)^ospf(\\d)", "ospf $1")                     // ospf1 at start
-            .replaceAll("(?i)^acl(\\d)", "acl $1");                      // acl3000 at start
-    }
 
+    /** 从 display version 回显识别型号：遍历注册表全部型号，整词匹配，长名优先 */
     private String extractModel(String info) {
         if (info == null) return null;
-        for (String m : List.of("USG6000V", "S5700", "AR2220", "S3700", "AR1220"))
-            if (info.contains(m)) return m;
+        if (info.contains("CX6000")) return "CX"; // 回显别名映射到注册表 key
+        List<String> names = new ArrayList<>(TopoXmlWriter.allModelNames());
+        names.sort((a, b) -> b.length() - a.length());
+        for (String m : names) {
+            if (m.length() < 4) continue; // 太短易误命中
+            // 整词匹配，避免 "Routing" 误命中 "Router"
+            if (java.util.regex.Pattern.compile("\\b" + java.util.regex.Pattern.quote(m) + "\\b")
+                .matcher(info).find()) return m;
+        }
         return null;
     }
     private String extractSysname(String cfg) {
@@ -613,9 +624,13 @@ public class ChatController {
     }
     private String inferType(String m) {
         if (m == null) return "unknown";
+        String t = TopoXmlWriter.modelType(m);
+        if (t != null && !"unknown".equals(t)) return t;
+        CommandKnowledgeService.ModelKnowledge mk = knowledgeService.getModel(m);
+        if (mk != null && mk.type != null && !mk.type.isBlank()) return mk.type;
         if (m.startsWith("USG")) return "firewall";
-        if (m.startsWith("S5") || m.startsWith("S3")) return "switch";
-        if (m.startsWith("AR")) return "router";
+        if (m.startsWith("S5") || m.startsWith("S3") || m.startsWith("CE")) return "switch";
+        if (m.startsWith("AR") || m.startsWith("NE")) return "router";
         return "unknown";
     }
     private List<String> inferInterfaces(String model) {

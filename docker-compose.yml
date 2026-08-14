@@ -1,0 +1,76 @@
+# TopoPilot 一键部署（Docker Desktop）
+#
+# 启动：
+#   set DEEPSEEK_API_KEY=sk-xxx      （Windows cmd，或用 .env 文件）
+#   docker compose up -d --build
+# 访问：http://localhost:8088
+#
+# eNSP 要求：先在 Windows 本机启动 eNSP 拓扑（设备 Telnet 端口 2000-2050）。
+# 后端容器通过 host.docker.internal 连接本机 eNSP（ENSP_HOST 可覆盖）。
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: topopilot-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "12345678"
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 首次启动自动建库建表（tb_user/tb_topology/tb_chat_history/tb_chat_summary）
+      - ./server/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    # 需要本机直连容器 MySQL 时打开（避开本机 3306 冲突，映射到 3307）：
+    # ports:
+    #   - "3307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p12345678"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: topopilot-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build: ./server
+    container_name: topopilot-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      # DeepSeek API Key（必填）。也可放在 .env：DEEPSEEK_API_KEY=sk-xxx
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # eNSP 所在主机：Docker Desktop 下 host.docker.internal 指向 Windows 本机
+      ENSP_HOST: ${ENSP_HOST:-host.docker.internal}
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/topo_assistant?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: "12345678"
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+    ports:
+      # 8080 被占用时改左边端口，如 "8090:8080"
+      - "8080:8080"
+
+  web:
+    build: ./client
+    container_name: topopilot-web
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      # 80 被占用时改左边端口，如 "8088:80" → 访问 http://localhost:8088
+      - "8088:80"
+
+volumes:
+  mysql-data:

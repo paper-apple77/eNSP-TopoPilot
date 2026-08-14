@@ -10,5 +10,10 @@ spring:
       port: 6379
 
 deepseek:
-  api-key: 你的DeepSeek_API_Key
+  # 推荐用环境变量注入，不写进文件：export DEEPSEEK_API_KEY=你的Key（Windows 用 set）
+  api-key: ${DEEPSEEK_API_KEY:}
   model: deepseek-chat
+
+ensp:
+  # eNSP 所在主机：本机运行默认 127.0.0.1，Docker 部署设为 host.docker.internal
+  host: ${ENSP_HOST:127.0.0.1}

@@ -1,23 +1,32 @@
 package com.topo.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
+import dev.langchain4j.agent.tool.ToolSpecification;
+import dev.langchain4j.agent.tool.ToolSpecifications;
+import dev.langchain4j.data.message.*;
+import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
+import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
+import dev.langchain4j.service.tool.DefaultToolExecutor;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 /**
- * DeepSeek API 调用 — 支持 Function Calling 多轮循环
+ * AI 对话服务 — 基于 LangChain4j + DeepSeek（OpenAI 兼容接口）
+ *
+ * Agent 模式：原生 Function Calling 多轮循环（tools 参数），
+ * 框架负责工具 schema 下发与 tool_calls 解析，本类负责循环编排：
+ * 不同设备并行执行工具、同一设备内保持顺序、支持手动停止。
  */
 @Service
 public class ChatService {
@@ -29,31 +38,53 @@ public class ChatService {
     private String apiKey;
 
     @Value("${deepseek.model:deepseek-chat}")
-    private String model;
+    private String modelName;
+
+    @Value("${deepseek.base-url:https://api.deepseek.com/v1}")
+    private String baseUrl;
+
+    private OpenAiStreamingChatModel model;
 
     /** Function Calling 最大循环轮数（0 = 无限制） */
     private static final int MAX_TOOL_ROUNDS = 0;
+
+    /** 工具执行线程池：不同设备并行执行工具调用 */
+    private final ExecutorService toolExecutor = Executors.newFixedThreadPool(6);
 
     public ChatService(ObjectMapper objectMapper, ToolRegistry toolRegistry) {
         this.objectMapper = objectMapper;
         this.toolRegistry = toolRegistry;
     }
 
+    @PostConstruct
+    public void init() {
+        // key 未配置时保留其他功能可用（登录/拓扑/设备连接），AI 调用时给出明确报错
+        if (apiKey == null || apiKey.isBlank()) {
+            System.err.println("[ChatService] ⚠️ 未配置 DEEPSEEK_API_KEY，AI 对话不可用。" +
+                "Docker: compose 环境变量；本机: export/set DEEPSEEK_API_KEY 后重启。");
+            return;
+        }
+        model = OpenAiStreamingChatModel.builder()
+            .apiKey(apiKey)
+            .modelName(modelName)
+            .baseUrl(baseUrl)
+            .build();
+        System.out.println("[ChatService] LangChain4j 模型初始化: " + modelName + " @ " + baseUrl);
+    }
+
+    @PreDestroy
+    public void shutdown() { toolExecutor.shutdownNow(); }
+
     /**
      * Agent 模式：AI 可以调工具，多轮循环直到完成任务
      */
     public void agentChat(String systemPrompt, List<Map<String, String>> history,
                           String userMessage, Consumer<AgentEvent> callback,
-                          java.util.concurrent.atomic.AtomicBoolean cancelled) throws Exception {
+                          AtomicBoolean cancelled) throws Exception {
 
-        List<Map<String, String>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", systemPrompt));
-        if (history != null && !history.isEmpty()) {
-            int start = Math.max(0, history.size() - 10);
-            messages.addAll(history.subList(start, history.size()));
-        }
-        messages.add(Map.of("role", "user", "content", userMessage));
-
+        if (model == null) throw new IllegalStateException("未配置 DEEPSEEK_API_KEY 环境变量，AI 功能不可用");
+        List<ChatMessage> messages = buildMessages(systemPrompt, history, userMessage);
+        List<ToolSpecification> toolSpecs = ToolSpecifications.toolSpecificationsFrom(toolRegistry);
         StringBuilder fullResponse = new StringBuilder();
 
         int round = 0;
@@ -65,17 +96,14 @@ public class ChatService {
             }
             callback.accept(new AgentEvent("thinking", "AI 思考中... (第" + (round + 1) + "轮)", null));
 
-            String aiOutput = callDeepSeek(messages, chunk -> {
-                callback.accept(new AgentEvent("token", chunk, null));
-            });
+            AiMessage ai = streamChat(messages, toolSpecs, callback);
+            String text = ai.text() != null ? ai.text() : "";
+            fullResponse.append(text);
+            System.out.println("[Agent] 第" + (round + 1) + "轮 AI输出(" + text.length() + "字): "
+                + text.substring(0, Math.min(200, text.length())).replace('\n',' '));
 
-            fullResponse.append(aiOutput);
-            System.out.println("[Agent] 第" + (round + 1) + "轮 AI输出(" + aiOutput.length() + "字): " + aiOutput.substring(0, Math.min(200, aiOutput.length())).replace('\n',' '));
-
-            List<String> toolCalls = toolRegistry.extractAllToolCalls(aiOutput);
-            System.out.println("[Agent] 第" + (round + 1) + "轮, 发现 " + toolCalls.size() + " 个工具调用");
-            if (toolCalls.isEmpty()) {
-                if (aiOutput.isBlank()) {
+            if (!ai.hasToolExecutionRequests()) {
+                if (text.isBlank()) {
                     String fallback = "（AI 未生成回复，请重试或简化问题）";
                     fullResponse.append(fallback);
                     callback.accept(new AgentEvent("token", fallback, null));
@@ -84,192 +112,131 @@ public class ChatService {
                 return;
             }
 
-            // 串行执行工具（同一设备不能并行，会互相干扰）
-            List<String> toolResults = new ArrayList<>();
-            for (String tcJson : toolCalls) {
-                try {
-                    Map<String, Object> tcObj = objectMapper.readValue(tcJson, Map.class);
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> toolCall = (Map<String, Object>) tcObj.get("tool_call");
-                    if (toolCall == null) continue;
-                    String toolName = (String) toolCall.get("name");
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> params = (Map<String, Object>) toolCall.get("params");
+            List<ToolExecutionRequest> requests = ai.toolExecutionRequests();
+            System.out.println("[Agent] 第" + (round + 1) + "轮, " + requests.size() + " 个工具调用: "
+                + requests.stream().map(ToolExecutionRequest::name).toList());
 
-                    callback.accept(new AgentEvent("tool_start",
-                        "查询 " + params.getOrDefault("device_name", "") + " (" + toolName + ")", null));
-
-                    String toolResult = toolRegistry.execute(toolName, params);
-                    toolResults.add("--- [" + toolName + " " + params.getOrDefault("device_name", "") + "] ---\n" + toolResult);
-                    System.out.println("[Agent] " + toolName + " → " + (toolResult != null ? toolResult.length() + "B" : "null"));
-                } catch (Exception e) {
-                    System.err.println("[Agent] 工具执行失败: " + e.getMessage());
-                }
+            // 按设备分组：不同设备并行执行，同一设备内保持调用顺序
+            // （每台设备的 Telnet 会话由 TelnetService 的设备锁保护）
+            Map<String, List<Integer>> groups = new LinkedHashMap<>();
+            for (int i = 0; i < requests.size(); i++) {
+                groups.computeIfAbsent(deviceOf(requests.get(i)), k -> new ArrayList<>()).add(i);
             }
+            String[] toolResults = new String[requests.size()];
+            CountDownLatch latch = new CountDownLatch(groups.size());
+            for (List<Integer> idxs : groups.values()) {
+                toolExecutor.submit(() -> {
+                    try {
+                        for (int i : idxs) {
+                            if (cancelled != null && cancelled.get()) break;
+                            ToolExecutionRequest req = requests.get(i);
+                            callback.accept(new AgentEvent("tool_start",
+                                "查询 " + deviceOf(req) + " (" + req.name() + ")", null));
+                            String result = new DefaultToolExecutor(toolRegistry, req).execute(req, null);
+                            toolResults[i] = "--- [" + req.name() + " " + deviceOf(req) + "] ---\n" + result;
+                            System.out.println("[Agent] " + req.name() + " → "
+                                + (result != null ? result.length() + "B" : "null"));
+                        }
+                    } catch (Exception e) {
+                        System.err.println("[Agent] 工具执行失败: " + e.getMessage());
+                    } finally {
+                        latch.countDown();
+                    }
+                });
+            }
+            latch.await();
 
-            // 所有工具结果一次性反馈给 AI，不截断
-            String combinedResults = String.join("\n\n", toolResults);
-            messages.add(Map.of("role", "assistant", "content", aiOutput));
-            messages.add(Map.of("role", "user", "content", "工具结果:\n" + combinedResults));
+            // 按协议回填：一条 tool_calls 对应一条 tool 结果消息（保持消息交替顺序）
+            messages.add(ai);
+            for (int i = 0; i < requests.size(); i++) {
+                String r = toolResults[i] != null ? toolResults[i] : "[已取消]";
+                messages.add(ToolExecutionResultMessage.from(requests.get(i), r));
+            }
         }
 
         callback.accept(new AgentEvent("done", "达到最大轮数，任务可能未完成", fullResponse.toString()));
     }
 
     /**
-     * 普通流式对话（不调工具）—— 直接用最简代码保证逐字输出
+     * 普通流式对话（不调工具）—— 设计模式使用
      */
     public void chatStream(String systemPrompt, List<Map<String, String>> history,
                            String userMessage, Consumer<String> callback) throws Exception {
-        List<Map<String, String>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", systemPrompt));
-        if (history != null && !history.isEmpty()) {
-            int start = Math.max(0, history.size() - 10);
-            messages.addAll(history.subList(start, history.size()));
-        }
-        messages.add(Map.of("role", "user", "content", userMessage));
+        if (model == null) throw new IllegalStateException("未配置 DEEPSEEK_API_KEY 环境变量，AI 功能不可用");
+        List<ChatMessage> messages = buildMessages(systemPrompt, history, userMessage);
 
-        Map<String, Object> body = Map.of("model", model, "messages", messages, "stream", true);
-        String json = objectMapper.writeValueAsString(body);
-
-        HttpURLConnection conn = (HttpURLConnection) URI.create(
-            "https://api.deepseek.com/v1/chat/completions").toURL().openConnection();
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Authorization", "Bearer " + apiKey);
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setDoOutput(true);
-        conn.setConnectTimeout(10000);
-        conn.setReadTimeout(60000);
-
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(json.getBytes(StandardCharsets.UTF_8));
-            os.flush();
-        }
-
-        // 检查 HTTP 错误码
-        int code = conn.getResponseCode();
-        if (code != 200) {
-            // 读取错误详情
-            try (java.io.InputStream es = conn.getErrorStream()) {
-                if (es != null) {
-                    String err = new String(es.readAllBytes(), StandardCharsets.UTF_8);
-                    System.err.println("[DeepSeek] HTTP " + code + ": " + err);
-                }
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        model.chat(messages, new StreamingChatResponseHandler() {
+            @Override public void onPartialResponse(String token) { callback.accept(token); }
+            @Override public void onCompleteResponse(ChatResponse response) {
+                System.out.println("[DeepSeek] 完成: finish=" + response.finishReason()
+                    + " tokens=" + (response.tokenUsage() != null ? response.tokenUsage().totalTokenCount() : "?"));
+                latch.countDown();
             }
-            throw new IOException("DeepSeek API returned " + code);
-        }
-
-        // 逐字节读取，避免 BufferedReader 内部缓冲
-        try (InputStream is = conn.getInputStream()) {
-            java.io.ByteArrayOutputStream lineBuf = new java.io.ByteArrayOutputStream();
-            long firstTokenAt = 0;
-            int tokenCount = 0;
-            String finishReason = "unknown";
-            int b;
-            while ((b = is.read()) != -1) {
-                if (b == '\n') {
-                    String line = lineBuf.toString("UTF-8");
-                    lineBuf.reset();
-                    if (line.contains("[DONE]")) break;
-                    if (line.startsWith("data: ")) {
-                        try {
-                            String data = line.substring(6);
-                            Map<String, Object> chunk = objectMapper.readValue(data, Map.class);
-                            @SuppressWarnings("unchecked")
-                            List<Map<String, Object>> choices = (List<Map<String, Object>>) chunk.get("choices");
-                            if (choices != null && !choices.isEmpty()) {
-                                Map<String, Object> choice = choices.get(0);
-                                if (choice.get("finish_reason") != null) finishReason = choice.get("finish_reason").toString();
-                                Map<String, Object> delta = (Map<String, Object>) choice.get("delta");
-                                if (delta != null && delta.get("content") != null) {
-                                    String token = delta.get("content").toString();
-                                    if (firstTokenAt == 0) firstTokenAt = System.currentTimeMillis();
-                                    tokenCount++;
-                                    callback.accept(token);
-                                }
-                            }
-                        } catch (Exception ignored) {}
-                    }
-                } else {
-                    lineBuf.write(b);
-                }
-            }
-            if (tokenCount == 0) System.out.println("[SSE] 空响应 finish_reason=" + finishReason);
-            long elapsed = firstTokenAt > 0 ? System.currentTimeMillis() - firstTokenAt : 0;
-            System.out.println("[SSE] 收到 " + tokenCount + " 个 token，首个 token 之后耗时 " + elapsed + "ms");
-        }
+            @Override public void onError(Throwable t) { error.set(t); latch.countDown(); }
+        });
+        latch.await();
+        if (error.get() != null) throw new RuntimeException("DeepSeek 调用失败: " + error.get().getMessage(), error.get());
     }
 
-    /** 调用 DeepSeek API，流式返回完整响应（逐字节读，确保 streaming） */
-    private String callDeepSeek(List<Map<String, String>> messages, Consumer<String> onToken) throws Exception {
-        Map<String, Object> body = Map.of(
-            "model", model,
-            "messages", messages,
-            "stream", true
-        );
-
-        String json = objectMapper.writeValueAsString(body);
-        HttpURLConnection conn = (HttpURLConnection) URI.create(
-            "https://api.deepseek.com/v1/chat/completions").toURL().openConnection();
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Authorization", "Bearer " + apiKey);
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setDoOutput(true);
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(120000);
-
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(json.getBytes(StandardCharsets.UTF_8));
-            os.flush();
-        }
-
-        System.out.println("[DeepSeek] 请求, messages=" + messages.size() + "条, body=" + json.length() + "B");
-        int code = conn.getResponseCode();
-        System.out.println("[DeepSeek] 响应码: " + code);
-        if (code != 200) {
-            try (InputStream es = conn.getErrorStream()) {
-                if (es != null) System.err.println("[DeepSeek] HTTP " + code + ": " + new String(es.readAllBytes(), StandardCharsets.UTF_8));
-            }
-            throw new IOException("DeepSeek API returned " + code);
-        }
-
-        StringBuilder full = new StringBuilder();
-        String finishReason = "unknown";
-        try (InputStream is = conn.getInputStream()) {
-            java.io.ByteArrayOutputStream lineBuf = new java.io.ByteArrayOutputStream();
-            int b;
-            while ((b = is.read()) != -1) {
-                if (b == '\n') {
-                    String line = lineBuf.toString("UTF-8");
-                    lineBuf.reset();
-                    if (line.contains("[DONE]")) break;
-                    if (line.startsWith("data: ")) {
-                        try {
-                            String data = line.substring(6);
-                            Map<String, Object> chunk = objectMapper.readValue(data, Map.class);
-                            @SuppressWarnings("unchecked")
-                            List<Map<String, Object>> choices = (List<Map<String, Object>>) chunk.get("choices");
-                            if (choices != null && !choices.isEmpty()) {
-                                Map<String, Object> choice = choices.get(0);
-                                if (choice.get("finish_reason") != null) finishReason = choice.get("finish_reason").toString();
-                                Map<String, Object> delta = (Map<String, Object>) choice.get("delta");
-                                if (delta != null && delta.get("content") != null) {
-                                    String token = delta.get("content").toString();
-                                    full.append(token);
-                                    onToken.accept(token);
-                                }
-                            }
-                        } catch (Exception ignored) {}
-                    }
-                } else {
-                    lineBuf.write(b);
-                }
+    /** 组装消息列表：系统提示词 + 最近历史 + 用户消息 */
+    private List<ChatMessage> buildMessages(String systemPrompt, List<Map<String, String>> history,
+                                            String userMessage) {
+        List<ChatMessage> messages = new ArrayList<>();
+        messages.add(SystemMessage.from(systemPrompt));
+        if (history != null && !history.isEmpty()) {
+            int start = Math.max(0, history.size() - 10);
+            for (Map<String, String> m : history.subList(start, history.size())) {
+                if ("user".equals(m.get("role"))) messages.add(UserMessage.from(m.get("content")));
+                else messages.add(AiMessage.from(m.get("content")));
             }
         }
-        if (full.length() == 0) {
-            System.out.println("[DeepSeek] 空响应 finish_reason=" + finishReason);
+        messages.add(UserMessage.from(userMessage));
+        return messages;
+    }
+
+    /** 流式调用一轮（带工具定义），返回完整 AiMessage（含 text 和 tool_calls） */
+    private AiMessage streamChat(List<ChatMessage> messages, List<ToolSpecification> toolSpecs,
+                                 Consumer<AgentEvent> callback) throws Exception {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<AiMessage> result = new AtomicReference<>();
+        AtomicReference<Throwable> error = new AtomicReference<>();
+
+        System.out.println("[DeepSeek] 请求: messages=" + messages.size() + "条, tools=" + toolSpecs.size());
+        ChatRequest request = ChatRequest.builder()
+            .messages(messages)
+            .toolSpecifications(toolSpecs)
+            .build();
+
+        model.chat(request, new StreamingChatResponseHandler() {
+            @Override public void onPartialResponse(String token) {
+                callback.accept(new AgentEvent("token", token, null));
+            }
+            @Override public void onCompleteResponse(ChatResponse response) {
+                System.out.println("[DeepSeek] 响应: finish=" + response.finishReason()
+                    + " tokens=" + (response.tokenUsage() != null ? response.tokenUsage().totalTokenCount() : "?"));
+                result.set(response.aiMessage());
+                latch.countDown();
+            }
+            @Override public void onError(Throwable t) { error.set(t); latch.countDown(); }
+        });
+        latch.await();
+        if (error.get() != null) throw new RuntimeException("DeepSeek 调用失败: " + error.get().getMessage(), error.get());
+        if (result.get() == null) throw new RuntimeException("DeepSeek 无响应");
+        return result.get();
+    }
+
+    /** 从工具调用参数中提取设备名（用于分组并行） */
+    private String deviceOf(ToolExecutionRequest req) {
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> args = objectMapper.readValue(req.arguments(), Map.class);
+            Object d = args.get("device_name");
+            return d != null ? String.valueOf(d) : "";
+        } catch (Exception e) {
+            return "";
         }
-        return full.toString();
     }
 
     /** Agent 事件 */

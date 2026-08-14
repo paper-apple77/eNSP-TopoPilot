@@ -1,6 +1,7 @@
 # 依赖
 node_modules/
 server/target/
+target/
 
 # IDE
 .idea/
@@ -11,6 +12,9 @@ server/target/
 .DS_Store
 Thumbs.db
 tu/
+
+# 同步工具标记
+.stfolder/
 
 # 编译产物
 *.class

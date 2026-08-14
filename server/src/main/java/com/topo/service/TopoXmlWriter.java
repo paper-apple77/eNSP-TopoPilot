@@ -146,6 +146,32 @@ public class TopoXmlWriter {
         Map.entry("Cellphone", List.of())
     );
 
+    /** 全部已知型号名（用于 display version 回显识别设备型号） */
+    public static Set<String> allModelNames() {
+        Set<String> names = new LinkedHashSet<>();
+        names.addAll(CATEGORY_MODE);
+        names.addAll(CATEGORY_10GE);
+        names.addAll(CATEGORY_CE_COUNT.keySet());
+        names.addAll(SWITCH_SPECS.keySet());
+        names.addAll(ROUTER_SPECS.keySet());
+        names.addAll(FW_COUNT_SPECS.keySet());
+        names.addAll(WIRELESS_SPECS.keySet());
+        names.addAll(TERMINAL_SPECS.keySet());
+        names.addAll(OTHER_SPECS.keySet());
+        return names;
+    }
+
+    /** 型号 → 设备大类（switch/router/firewall/wireless/terminal） */
+    public static String modelType(String model) {
+        if (model == null) return "unknown";
+        if (CATEGORY_MODE.contains(model) || FW_COUNT_SPECS.containsKey(model)) return "firewall";
+        if ("CX".equals(model) || CATEGORY_CE_COUNT.containsKey(model) || SWITCH_SPECS.containsKey(model)) return "switch";
+        if (CATEGORY_10GE.contains(model) || ROUTER_SPECS.containsKey(model)) return "router";
+        if (WIRELESS_SPECS.containsKey(model)) return "wireless";
+        if (TERMINAL_SPECS.containsKey(model)) return "terminal";
+        return "unknown";
+    }
+
     /** 写设备接口 */
     private void writeInterfaces(StringBuilder sb, String model) {
         if (model == null) model = "AR2220";
