@@ -1,6 +1,7 @@
 package com.topo.service;
 
 import com.topo.model.vo.TopologyJson;
+import org.springframework.web.util.HtmlUtils;
 import java.util.*;
 import org.springframework.stereotype.Component;
 
@@ -40,10 +41,12 @@ public class TopoXmlWriter {
                 String cyStr = String.format("%.6f", cy).replace(" ", "");
                 String elStr = String.format("%.6f", cx + 25).replace(" ", "");
                 String etStr = String.format("%.6f", cy + 50).replace(" ", "");
+                String escapedName = HtmlUtils.htmlEscape(d.getName(), "UTF-8");
+                String escapedModel = HtmlUtils.htmlEscape(model, "UTF-8");
                 sb.append(String.format("        <dev id=\"%s\" name=\"%s\" poe=\"0\" model=\"%s\" " +
                     "settings=\"\" system_mac=\"%s\" com_port=\"%d\" bootmode=\"1\" " +
                     "cx=\"%s\" cy=\"%s\" edit_left=\"%s\" edit_top=\"%s\">\n",
-                    id, d.getName(), model, mac, comPort,
+                    id, escapedName, escapedModel, mac, comPort,
                     cxStr, cyStr, elStr, etStr));
 
                 writeInterfaces(sb, model);

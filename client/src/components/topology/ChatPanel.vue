@@ -66,24 +66,31 @@ async function send() {
     ? selectedDevices.value.join(',')
     : ''
 
-  // POST 方式避免 URL 过长
+  // POST 方式避免 URL 过长；token 放 Authorization header，避免出现在代理日志/浏览器历史
   const formData = new URLSearchParams()
   formData.append('message', text)
   formData.append('topologyJson', props.topologyJson || '{}')
   formData.append('mode', props.mode || 'connect')
-  formData.append('token', token || '')
   formData.append('devices', devicesParam)
   if (props.topologyId) formData.append('topologyId', String(props.topologyId))
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/x-www-form-urlencoded' }
+  if (token) headers['Authorization'] = `Bearer ${token}`
 
   abortCtrl = new AbortController()
   try {
     const response = await fetch('/api/chat/stream', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers,
       body: formData.toString(),
       signal: abortCtrl.signal
     })
-    if (!response.ok) { loading.value = false; return }
+    if (!response.ok) {
+      loading.value = false
+      const errText = await response.text().catch(() => '')
+      ElMessage.error(errText || `请求失败 (${response.status})`)
+      return
+    }
     const reader = response.body!.getReader()
     const decoder = new TextDecoder()
     let buffer = ''

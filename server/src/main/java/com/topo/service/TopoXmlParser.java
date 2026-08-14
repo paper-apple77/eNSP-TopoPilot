@@ -32,11 +32,15 @@ public class TopoXmlParser {
         xml = xml.replace("encoding=\"UNICODE\"", "encoding=\"UTF-8\"");
         if (!xml.startsWith("<?xml")) throw new RuntimeException("无法解析 .topo 文件");
 
-        Document doc = DocumentBuilderFactory.newInstance()
-            .newDocumentBuilder().parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        factory.setXIncludeAware(false);
+        factory.setExpandEntityReferences(false);
+        Document doc = factory.newDocumentBuilder()
+            .parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
         doc.getDocumentElement().normalize();
 
-        // ... rest of parsing (same as before)
+        // 解析 <dev> 和 <line> 节点
         TopologyJson topo = new TopologyJson();
         topo.setDevices(new ArrayList<>());
         topo.setConnections(new ArrayList<>());

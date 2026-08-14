@@ -60,6 +60,10 @@ public class ChatController {
                             HttpServletRequest request,
                             HttpServletResponse response) throws Exception {
         Long userId = (Long) request.getAttribute("userId");
+        if (userId == null) {
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            return;
+        }
 
         // 解析拓扑
         TopologyJson topoJson = new TopologyJson();
@@ -360,6 +364,9 @@ public class ChatController {
     @Operation(summary = "扫描 eNSP 设备端口", description = "扫描本机 2000-2050 端口发现 eNSP 启动的设备")
     @GetMapping("/devices/scan")
     public Result<List<Integer>> scanDevices(@RequestParam(defaultValue = "2000") int start, @RequestParam(defaultValue = "2050") int end) {
+        if (start < 1 || end > 65535 || start > end || end - start > 1000) {
+            return Result.error("扫描范围无效：1-65535，最大跨度 1000");
+        }
         return Result.success(telnetService.scanDevices(start, end));
     }
 

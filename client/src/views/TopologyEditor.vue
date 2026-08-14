@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import TopologyCanvas from '../components/topology/TopologyCanvas.vue'
 import ChatPanel from '../components/topology/ChatPanel.vue'
@@ -159,10 +159,10 @@ function onConnectedChange(devices: string[]) {
   connectedDevices.value = devices
 }
 
-function deviceCount(): number {
+const deviceCount = computed(() => {
   try { return JSON.parse(topologyJson.value).devices?.length || 0 }
   catch { return 0 }
-}
+})
 </script>
 
 <template>

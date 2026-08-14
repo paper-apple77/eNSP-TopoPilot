@@ -14,6 +14,7 @@ const props = defineProps<{ topologyJson: string }>()
 const containerRef = ref<HTMLDivElement>()
 let lf: LogicFlow | null = null
 let rendered = false
+let tooltipEl: HTMLDivElement | null = null
 
 // ===== 设备颜色 =====
 const typeStyle: Record<string, { fill: string; stroke: string }> = {
@@ -169,6 +170,7 @@ function createTooltip() {
   const t = document.createElement('div')
   t.style.cssText = 'position:fixed;background:#333;color:#fff;padding:10px 14px;border-radius:4px;font-size:12px;pointer-events:none;z-index:9999;display:none;white-space:pre-line;max-width:500px;line-height:1.4;font-family:monospace'
   document.body.appendChild(t)
+  tooltipEl = t
   return t
 }
 
@@ -180,10 +182,8 @@ function loadJson(jsonStr: string) {
   requestAnimationFrame(() => requestAnimationFrame(() => { lf?.resize(); fitAll(data.nodes) }))
 }
 
-defineExpose({ loadJson })
-
 onMounted(() => nextTick(init))
-onUnmounted(() => { lf?.destroy(); lf = null; rendered = false })
+onUnmounted(() => { tooltipEl?.remove(); tooltipEl = null; lf?.destroy(); lf = null; rendered = false })
 watch(() => props.topologyJson, (v) => { if (v && lf) loadJson(v) })
 </script>
 

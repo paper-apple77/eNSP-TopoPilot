@@ -440,7 +440,12 @@ public class TelnetService {
 
     public void disconnect(String name) {
         TelnetSession s = sessions.remove(name);
-        if (s != null) { s.disconnect(); System.out.println("[Telnet] 已断开 " + name); }
+        if (s != null) {
+            s.disconnect();
+            System.out.println("[Telnet] 已断开 " + name);
+        }
+        deviceLocks.remove(name);
+        cachedConfig.remove(name);
     }
 
     /** 心跳保活：每 3 分钟对已连接设备发空回车，防止空闲超时断开（设备忙时跳过，避免干扰 AI 命令） */

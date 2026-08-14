@@ -45,8 +45,8 @@ public class ChatService {
 
     private OpenAiStreamingChatModel model;
 
-    /** Function Calling 最大循环轮数（0 = 无限制） */
-    private static final int MAX_TOOL_ROUNDS = 0;
+    /** Function Calling 最大循环轮数（防止 AI 死循环烧配额） */
+    private static final int MAX_TOOL_ROUNDS = 20;
 
     /** 工具执行线程池：不同设备并行执行工具调用 */
     private final ExecutorService toolExecutor = Executors.newFixedThreadPool(6);
@@ -144,7 +144,10 @@ public class ChatService {
                     }
                 });
             }
-            latch.await();
+            latch.await(5, TimeUnit.MINUTES);
+            if (latch.getCount() > 0) {
+                throw new RuntimeException("工具执行超时（5分钟），部分设备可能未完成");
+            }
 
             // 按协议回填：一条 tool_calls 对应一条 tool 结果消息（保持消息交替顺序）
             messages.add(ai);
