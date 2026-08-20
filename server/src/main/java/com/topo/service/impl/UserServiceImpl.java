@@ -12,6 +12,8 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.DigestUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
@@ -30,6 +32,8 @@ import java.util.concurrent.TimeUnit;
 @Service
 @RequiredArgsConstructor
 public class UserServiceImpl implements UserService {
+
+    private static final Logger log = LoggerFactory.getLogger(UserServiceImpl.class);
 
     /** 登录限流：同邮箱连续失败 5 次锁 10 分钟 */
     private static final int MAX_LOGIN_FAILS = 5;
@@ -143,7 +147,7 @@ public class UserServiceImpl implements UserService {
         if (stored != null && stored.equals(md5(raw))) {
             user.setPassword(encoder.encode(raw));
             userMapper.updateById(user);
-            System.out.println("[Auth] 老账号密码已从 MD5 平滑升级为 BCrypt: " + user.getEmail());
+            log.info("[Auth] 老账号密码已从 MD5 平滑升级为 BCrypt: " + user.getEmail());
             return true;
         }
         return false;

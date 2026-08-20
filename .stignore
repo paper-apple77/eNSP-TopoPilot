@@ -1,0 +1,33 @@
+// Syncthing 忽略规则（本项目 Mac↔Windows 双向同步）
+// 关键：node_modules 含平台专属原生二进制（rolldown/darwin vs win32），
+// 跨系统同步必然损坏，必须在每台机器本地 npm install。
+// 修改本文件后需重启 Syncthing 生效。
+
+// 依赖目录（每台机器本地安装）
+(?d)**/node_modules
+(?d)**/target
+(?d)**/dist
+
+// 日志与临时文件
+*.log
+logs
+.tmp
+temp
+
+// 系统文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+// IDE 配置（个人偏好，不同步）
+.idea
+.vscode
+*.iml
+
+// 本地环境变量（含密钥，绝不同步）
+.env
+.env.*
+!.env.example
+
+// 本地配置（含数据库密码等，绝不同步）
+application.yml

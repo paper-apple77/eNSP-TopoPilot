@@ -43,7 +43,7 @@ function switchToDesign() {
 
 /** 保存拓扑到 MySQL */
 async function handleSaveTopology() {
-  if (deviceCount() === 0) {
+  if (deviceCount.value === 0) {
     ElMessage.warning('画布还是空的，先添加几台设备再保存')
     return
   }
@@ -87,7 +87,7 @@ async function openTopoList() {
 /** 从列表加载拓扑到画布 */
 async function handleLoadTopology(row: any) {
   try {
-    if (deviceCount() > 0) {
+    if (deviceCount.value > 0) {
       await ElMessageBox.confirm('加载会覆盖当前画布内容，继续吗？', '加载拓扑', {
         type: 'warning',
         confirmButtonText: '加载',
@@ -182,12 +182,12 @@ const deviceCount = computed(() => {
         <el-tag v-if="currentTopologyId" type="info" size="small">{{ currentTopologyName }}</el-tag>
         <el-tag v-if="!designMode" type="success" size="small">智能配网</el-tag>
         <el-tag v-if="designMode" type="warning" size="small">拓扑设计</el-tag>
-        <el-tag v-if="deviceCount() > 0" type="info" size="small">{{ deviceCount() }} 台设备</el-tag>
-        <el-button size="small" :disabled="deviceCount() === 0" :loading="saving" @click="handleSaveTopology">
+        <el-tag v-if="deviceCount > 0" type="info" size="small">{{ deviceCount }} 台设备</el-tag>
+        <el-button size="small" :disabled="deviceCount === 0" :loading="saving" @click="handleSaveTopology">
           💾 保存
         </el-button>
         <el-button size="small" plain @click="openTopoList">📂 我的拓扑</el-button>
-        <el-button v-if="designMode && deviceCount() > 0" @click="handleExport" type="success" plain size="small">
+        <el-button v-if="designMode && deviceCount > 0" @click="handleExport" type="success" plain size="small">
           📤 导出 .topo
         </el-button>
         <el-button @click="handleLogout" type="danger" plain size="small">

@@ -50,7 +50,12 @@ public class PromptBuilder {
         sb.append("【设备能力】\n");
         for (TopologyJson.Device d : topo.getDevices()) {
             String caps = knowledgeService.getCapabilityText(d.getModel());
-            if (caps != null) sb.append("  ").append(caps).append("\n");
+            if (caps != null) {
+                sb.append("  ").append(caps).append("\n");
+            } else {
+                sb.append("  ").append(d.getName()).append(" [").append(d.getModel()).append("] 型号不在知识库 → ")
+                  .append(defaultCapByType(d.getType())).append("（待现场验证）\n");
+            }
         }
         sb.append("\n");
 
@@ -62,6 +67,12 @@ public class PromptBuilder {
 
         // 行为规范
         sb.append("【核心工作流：精准查询→分析→推送→验证→修正→总结】\n");
+        sb.append("【能力判定三阶梯】遇到知识库里没有的型号时，用下面的方法现场判定能力，不要反复犹豫：\n");
+        sb.append("  1. 知识库有该型号 → 直接采信能力表\n");
+        sb.append("  2. 没有 → 先按类型默认：交换机=纯二层(不能配接口IP/VLANIF)，路由器=三层全功能，防火墙=安全/NAT\n");
+        sb.append("  3. 现场验证(最多2条命令)：display version 确认型号；再在 system-view 下敲 ? 看可用命令，\n");
+        sb.append("     有 ip address / interface Vlanif 才算三层，没有就按纯二层处理\n");
+        sb.append("  验证完立即基于结论继续配置，不要在能力问题上反复查询！\n");
         sb.append("【重要限制】只能 Telnet 配置路由器/交换机/防火墙！PC/Server/Client 没有 Telnet！\n");
         sb.append("  遇到 PC/Server/Client 时：列出该设备的 IP/掩码/网关，告诉用户手动配置，不要调 sendConfig！\n");
         sb.append("【执行原则】先分析，再动手！\n");
@@ -75,6 +86,10 @@ public class PromptBuilder {
         sb.append("   （禁止用 quit 结尾！quit 在用户视图下会断开 Telnet 退到登录界面）\n");
         sb.append("7. 推送后必须验证，有 Error 就分析修正\n");
         sb.append("8. 用 Markdown 格式化回复：表格展示配置对比、**加粗**关键信息、`代码`标注命令\n");
+        sb.append("9. 同一信息最多查询2次！查不到就基于现有信息推进，并说明你的假设\n");
+        sb.append("10. 任务未全部完成时，每轮回复必须附带工具调用继续执行！\n");
+        sb.append("    只输出计划或说明就结束回合会导致任务中断。全部配置推送并验证通过后，\n");
+        sb.append("    才允许以纯文字输出最终总结。\n");
 
         return sb.toString();
     }
@@ -123,8 +138,8 @@ public class PromptBuilder {
         sb.append("  AC6005: GE0/0/1~8  AC6605: GE0/0/1~24\n");
         sb.append("  PC: Ethernet0/0/1  MCS: Ethernet0/0/1\n\n");
 
-        sb.append("【命名规范】\n");
-        sb.append("- 防火墙: FW_HZ, FW_SH, FW_BJ (带地点后缀)\n");
+        sb.append("【命名规范】（优先级最高：即使历史对话、记忆摘要或 eNSP 默认命名不同，也必须遵守本规则）\n");
+        sb.append("- 防火墙: FW1, FW2, FW3 (数字编号)。禁止使用 FW_HZ/FW_SH/FW_BJ 等地名后缀命名\n");
         sb.append("- 交换机: LSW1, LSW2, LSW3 (数字编号)\n");
         sb.append("- 路由器: AR1, AR2, Internet 等\n");
         sb.append("- PC: PC1, PC2, ...  Client: Client1, Client2, ...  Server: Server1, ...\n");
@@ -169,6 +184,16 @@ public class PromptBuilder {
             case "pc" -> "PC";
             case "server" -> "服务器";
             default -> type;
+        };
+    }
+
+    /** 知识库无此型号时，按设备类型给默认能力模型（第2阶梯，AI 仍需现场验证） */
+    private String defaultCapByType(String type) {
+        return switch (type == null ? "" : type) {
+            case "switch" -> "按交换机默认：纯二层（VLAN/trunk/STP），不能配接口IP和VLANIF";
+            case "router" -> "按路由器默认：三层全功能（接口IP/静态路由/动态路由）";
+            case "firewall" -> "按防火墙默认：安全区域/NAT/策略路由";
+            default -> "能力未知，先 display version 确认型号再探测";
         };
     }
 }

@@ -9,8 +9,11 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.ServletOutputStream;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -20,6 +23,8 @@ import java.util.concurrent.*;
 @RestController
 @RequestMapping("/api/chat")
 public class ChatController {
+
+    private static final Logger log = LoggerFactory.getLogger(ChatController.class);
 
     private final ChatService chatService;
     private final PromptBuilder promptBuilder;
@@ -50,7 +55,8 @@ public class ChatController {
 
     @Operation(summary = "SSE 流式对话",
             description = "mode=agent：配网模式（AI 自主调用工具查询/配置设备）；mode=design：拓扑设计模式。返回 text/event-stream")
-    @PostMapping("/stream")
+    // produces 显式声明，防止 Spring 按 octet-stream 处理导致代理解析错乱
+    @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public void chatStream(@RequestParam String message,
                             @RequestParam(required = false) String topologyJson,
                             @RequestParam(required = false, defaultValue = "connect") String mode,
@@ -74,11 +80,21 @@ public class ChatController {
             catch (Exception ignored) {}
         }
 
+        // 解析用户选定的设备（前端下拉框）；未选=全部，保持原行为
+        Set<String> selectedDevices = new HashSet<>();
+        if (devices != null && !devices.isBlank()) {
+            for (String d : devices.split(",")) {
+                String name = d.trim();
+                if (!name.isEmpty()) selectedDevices.add(name);
+            }
+        }
+
         String systemPrompt = promptBuilder.buildSystemPrompt(topoJson, message, mode);
-        // 连接模式：注入缓存中的轻量摘要，AI 无需重复查询
+        // 连接模式：注入缓存中的轻量摘要，AI 无需重复查询（只注入用户选定的设备）
         if (!"design".equals(mode)) {
             StringBuilder cacheCtx = new StringBuilder();
             for (String devName : telnetService.getConnectedDevices()) {
+                if (!selectedDevices.isEmpty() && !selectedDevices.contains(devName)) continue;
                 String cached = telnetService.getCachedConfig(devName);
                 if (cached != null && !cached.isBlank() && !cached.startsWith("[错误]")) {
                     cacheCtx.append("\n【").append(devName).append("】\n").append(cached).append("\n");
@@ -86,6 +102,11 @@ public class ChatController {
             }
             if (cacheCtx.length() > 0) {
                 systemPrompt += "\n\n" + cacheCtx + "\n以上是设备当前运行状态。如需细节再用 sendCommand 查询。";
+            }
+            // 用户选定设备约束：AI 只能操作选中的设备
+            if (!selectedDevices.isEmpty()) {
+                systemPrompt += "\n\n【用户选定设备】" + String.join(", ", selectedDevices)
+                    + "\n用户当前只关注以上设备：只对以上设备执行查询和配置，不要操作或修改其他设备。";
             }
         }
         // 注入久远对话的记忆摘要（内存窗口外的历史被 AI 压缩后的要点）
@@ -95,14 +116,15 @@ public class ChatController {
         }
         List<Map<String, String>> history = conversationHistory.getHistory(userId, topologyId, mode);
 
-        // 直接写 response，绕过 SseEmitter，零缓冲确保逐字输出
+        // 直接写 response，绕过 SseEmitter。不用 setBufferSize(0)（会让 Tomcat 对空缓冲反复
+        // flushBuffer 时输出异常的空 chunk，导致代理报 "Invalid character in chunk size"），
+        // 每帧写完 flushBuffer 一次即可保证逐字输出。
+        // Content-Type 必须在首次 flushBuffer 提交前设置（produces 注解在流式场景下来不及生效）
         response.setContentType("text/event-stream");
-        response.setCharacterEncoding("UTF-8");
         response.setHeader("Cache-Control", "no-cache");
         response.setHeader("X-Accel-Buffering", "no");
-        response.setBufferSize(0);
         ServletOutputStream out = response.getOutputStream();
-        out.flush();  // 立即发送 HTTP 头
+        response.flushBuffer();  // 立即提交响应头，进入流式输出
 
         // 推送命令：不调 AI，直接从历史中提取配置推送到设备
         if (!"design".equals(mode) && isPushCommand(message)) {
@@ -113,79 +135,50 @@ public class ChatController {
 
         try {
             // 先发思考提示
-            out.write("data:🔍 AI 正在分析...\n\n".getBytes(StandardCharsets.UTF_8));
-            out.flush();
-            response.flushBuffer();
+            sendSse(out, "🔍 AI 正在分析...", response);
 
             StringBuilder fullResponse = new StringBuilder();
             if ("design".equals(mode)) {
             // 设计模式：流式对话
             chatService.chatStream(systemPrompt, history, message, chunk -> {
                 fullResponse.append(chunk);
-                try {
-                    String safe = chunk.replace("\n", "\\n");
-                    out.write(("data:" + safe + "\n\n").getBytes(StandardCharsets.UTF_8));
-                    out.flush();
-                    response.flushBuffer();
-                } catch (Exception ignored) {}
+                sendSse(out, chunk.replace("\n", "\\n"), response);
             });
         } else {
             // 连接模式：Agent 自主调工具
             java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
             try {
                 chatService.agentChat(systemPrompt, history, message, event -> {
-                    try {
-                        switch (event.type) {
-                            case "thinking" -> {
-                                out.write(("data:💭 " + event.message + "\n\n").getBytes(StandardCharsets.UTF_8));
-                                out.flush();
-                                response.flushBuffer();
-                            }
-                            case "token" -> {
-                                fullResponse.append(event.message);
-                                String safe = event.message.replace("\n", "\\n");
-                                out.write(("data:" + safe + "\n\n").getBytes(StandardCharsets.UTF_8));
-                                out.flush();
-                                response.flushBuffer();
-                            }
-                            case "tool_start" -> {
-                                String msg = "🔧 " + event.message;
-                                out.write(("data:" + msg + "\n\n").getBytes(StandardCharsets.UTF_8));
-                                out.flush();
-                                response.flushBuffer();
-                            }
-                            case "tool_result" -> { /* 静默 */ }
-                            case "error" -> {
-                                out.write(("data:⚠️ " + event.message + "\n\n").getBytes(StandardCharsets.UTF_8));
-                                out.flush();
-                                response.flushBuffer();
-                            }
-                            case "done" -> {
-                                System.out.println("[Agent] 完成: " + event.message);
+                    switch (event.type) {
+                        case "thinking" -> sendSse(out, "💭 " + event.message, response);
+                        case "token" -> {
+                            fullResponse.append(event.message);
+                            if (!sendSse(out, event.message.replace("\n", "\\n"), response)) {
+                                cancelled.set(true); // 客户端断开，停止 Agent
                             }
                         }
-                    } catch (Exception e) {
-                        cancelled.set(true); // 客户端断开
+                        case "tool_start" -> sendSse(out, "🔧 " + event.message, response);
+                        case "tool_result" -> { /* 静默 */ }
+                        case "error" -> sendSse(out, "⚠️ " + event.message, response);
+                        case "done" -> {
+                            log.info("[Agent] 完成: " + event.message);
+                        }
                     }
                 }, cancelled);
             } catch (Exception e) {
-                System.err.println("[Chat] Agent异常: " + e.getMessage());
-                e.printStackTrace();
-                String errMsg = "⚠️ AI 处理异常: " + e.getMessage();
-                out.write(("data:" + errMsg + "\n\n").getBytes(StandardCharsets.UTF_8));
-                out.flush();
-                response.flushBuffer();
+                log.error("[Chat] Agent异常: " + e.getMessage(), e);
+                sendSse(out, "⚠️ AI 处理异常: " + e.getMessage(), response);
             }
         }
-            out.write("data:[DONE]\n\n".getBytes(StandardCharsets.UTF_8));
-            out.flush();
+            sendSse(out, "[DONE]", response);
 
             String aiReply = fullResponse.length() > 0 ? fullResponse.toString() : "completed";
             // 剥离工具调用 JSON 块，避免历史膨胀浪费下轮 token
             conversationHistory.add(userId, topologyId, message, toolRegistry.stripToolCallBlocks(aiReply), mode);
         } catch (Exception e) {
-            System.err.println("[Chat] SSE异常: " + e.getMessage());
-            try { out.write("data:⚠️ 系统异常，请重试\n\n".getBytes(StandardCharsets.UTF_8)); out.flush(); } catch (Exception ignored) {}
+            log.error("[Chat] SSE异常: " + e.getMessage(), e);
+            sendSse(out, "⚠️ 系统异常，请重试", response);
+            sendSse(out, "[DONE]", response);  // 异常也必须收尾，避免半截 chunk 导致代理 Parse Error
         }
     }
 
@@ -304,15 +297,9 @@ public class ChatController {
             + "【推送的配置】\n" + originalConfig + "\n\n【设备当前状态】\n" + verifyData;
         try {
             chatService.chatStream(prompt, List.of(), "验证", chunk -> {
-                try {
-                    String safe = chunk.replace("\n", "\\n");
-                    out.write(("data:" + safe + "\n\n").getBytes(StandardCharsets.UTF_8));
-                    out.flush();
-                    response.flushBuffer();
-                } catch (Exception ignored) {}
+                sendSse(out, chunk.replace("\n", "\\n"), response);
             });
-            out.write("data:[DONE]\n\n".getBytes(StandardCharsets.UTF_8));
-            out.flush();
+            sendSse(out, "[DONE]", response);
         } catch (Exception e) {
             sendSse(out, "验证异常: " + e.getMessage(), response);
         }
@@ -330,7 +317,7 @@ public class ChatController {
                 String firstWord = firstLine.split("\\s+")[0];
                 helpOutput = telnetService.sendCommand(devName, firstWord + " ?");
             }
-            System.out.println("[AutoFix] ? 输出(" + helpOutput.length() + "B)");
+            log.info("[AutoFix] ? 输出(" + helpOutput.length() + "B)");
 
             // 3. 把错误 + ? 输出 + 原命令一起给 AI 分析
             String shortError = error.length() > 500 ? error.substring(0, 500) : error;
@@ -343,21 +330,29 @@ public class ChatController {
             StringBuilder result = new StringBuilder();
             chatService.chatStream(prompt, List.of(), "修正", result::append);
             String fixed = result.toString().trim();
-            System.out.println("[AutoFix] AI 建议: " + fixed.substring(0, Math.min(100, fixed.length())));
+            log.info("[AutoFix] AI 建议: " + fixed.substring(0, Math.min(100, fixed.length())));
             if (fixed.contains("NO_FIX") || fixed.isBlank() || fixed.length() < 3) return null;
             return toolRegistry.fixCommandSpacing(fixed);
         } catch (Exception e) {
-            System.err.println("[AutoFix] " + e.getMessage());
+            log.error("[AutoFix] " + e.getMessage());
             return null;
         }
     }
 
-    private void sendSse(ServletOutputStream out, String msg, HttpServletResponse response) {
-        try {
-            out.write(("data:" + msg + "\n\n").getBytes(StandardCharsets.UTF_8));
-            out.flush();
-            response.flushBuffer();
-        } catch (Exception ignored) {}
+    /** 写一条 SSE 帧；返回 false 表示客户端已断开（用于终止 Agent 循环）。
+     *  必须加锁：Agent 模式下 tool_start 事件来自多个并行工具线程（每台设备一个），
+     *  ServletOutputStream 非线程安全，并发 write+flush 会交错损坏 chunked 帧，
+     *  代理报 "Expected LF after chunk data"。锁在 out 上统一串行化所有写。 */
+    private boolean sendSse(ServletOutputStream out, String msg, HttpServletResponse response) {
+        synchronized (out) {
+            try {
+                out.write(("data:" + msg + "\n\n").getBytes(StandardCharsets.UTF_8));
+                response.flushBuffer();
+                return true;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
     }
 
     // ===== Telnet =====
@@ -378,33 +373,48 @@ public class ChatController {
             for (String name : telnetService.getConnectedDevices()) {
                 telnetService.disconnect(name);
             }
+            TopologyJson topoRef = null;
+            if (body != null && body.get("topologyJson") != null) {
+                topoRef = objectMapper.readValue(body.get("topologyJson").toString(), TopologyJson.class);
+            }
             List<Integer> ports = telnetService.scanDevices();
             if (ports.isEmpty()) return Result.error("未发现设备，请先启动 eNSP 中的拓扑");
 
+            // 端口数少于拓扑设备数 → 可能有设备还没启动完，3 秒后二次扫描补漏
+            if (topoRef != null && topoRef.getDevices() != null) {
+                long expected = topoRef.getDevices().stream()
+                    .filter(d -> !"pc".equals(d.getType()) && !"client".equals(d.getType()) && !"server".equals(d.getType()))
+                    .count();
+                if (ports.size() < expected) {
+                    log.info("[ConnectAll] 端口数(" + ports.size() + ") < 拓扑设备数(" + expected + ")，3秒后二次扫描补漏");
+                    try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
+                    for (int p : telnetService.scanDevices()) {
+                        if (!ports.contains(p)) ports.add(p);
+                    }
+                }
+            }
+
             // com_port 匹配 + 顺序分配兜底（两个策略互补，不互斥）
             Map<Integer, String> portToName = new LinkedHashMap<>();
-            if (body != null && body.get("topologyJson") != null) {
-                TopologyJson existing = objectMapper.readValue(body.get("topologyJson").toString(), TopologyJson.class);
-                if (existing.getDevices() != null) {
-                    // 策略1: com_port 精确匹配
-                    for (TopologyJson.Device d : existing.getDevices()) {
-                        if (d.getComPort() > 0 && ports.contains(d.getComPort())) {
-                            portToName.put(d.getComPort(), d.getName());
-                        }
+            if (topoRef != null && topoRef.getDevices() != null) {
+                // 策略1: com_port 精确匹配
+                for (TopologyJson.Device d : topoRef.getDevices()) {
+                    if (d.getComPort() > 0 && ports.contains(d.getComPort())) {
+                        portToName.put(d.getComPort(), d.getName());
                     }
-                    // 策略2: 未匹配的端口按 .topo 设备顺序兜底
-                    List<TopologyJson.Device> nonPc = new ArrayList<>();
-                    for (TopologyJson.Device d : existing.getDevices()) {
-                        if (!"pc".equals(d.getType()) && !"client".equals(d.getType()) && !"server".equals(d.getType())) {
-                            nonPc.add(d);
-                        }
+                }
+                // 策略2: 未匹配的端口按 .topo 设备顺序兜底
+                List<TopologyJson.Device> nonPc = new ArrayList<>();
+                for (TopologyJson.Device d : topoRef.getDevices()) {
+                    if (!"pc".equals(d.getType()) && !"client".equals(d.getType()) && !"server".equals(d.getType())) {
+                        nonPc.add(d);
                     }
-                    int idx = 0;
-                    for (int p : ports) {
-                        if (!portToName.containsKey(p) && idx < nonPc.size()) {
-                            portToName.put(p, nonPc.get(idx).getName());
-                            idx++;
-                        }
+                }
+                int idx = 0;
+                for (int p : ports) {
+                    if (!portToName.containsKey(p) && idx < nonPc.size()) {
+                        portToName.put(p, nonPc.get(idx).getName());
+                        idx++;
                     }
                 }
             }
@@ -418,58 +428,97 @@ public class ChatController {
             }
 
             List<DeviceInfo> devices = Collections.synchronizedList(new ArrayList<>());
+            /** 连接失败（非密码原因）的设备，返回给前端展示，避免静默漏设备 */
+            List<Map<String, Object>> failedList = Collections.synchronizedList(new ArrayList<>());
             ExecutorService executor = Executors.newFixedThreadPool(Math.min(ports.size(), 6));
             List<CompletableFuture<Void>> futures = new ArrayList<>();
             for (int port : ports) {
                 String name = portToName.getOrDefault(port, "Device_" + port);
                 String pwd = userPwds.get(name);
                 futures.add(CompletableFuture.runAsync(() -> {
-                    System.out.println("[ConnectAll] " + name + ":" + port + " 开始连接 [" + Thread.currentThread().getName() + "]");
-                    if (telnetService.connect(name, telnetService.getEnspHost(), port, "admin", pwd)) {
-                        String info = telnetService.queryDeviceInfo(name);
-                        if (info == null || info.length() < 50) {
-                            System.out.println("[ConnectAll] 跳过 " + name + ":" + port + " - 无有效回显");
-                            telnetService.disconnect(name);
-                            return;
-                        }
-                        String model = extractModel(info);
-                        if (model == null) model = "unknown";
-                        String devName = name;
-                        // 用轻量摘要替代全量配置（快 5-10 倍，AI 直接用）
-                        String devType = inferType(model);
-                        String cfg = telnetService.queryLightConfig(name, devType);
-                        telnetService.updateCache(name, cfg);
-                        // 快速查 sysname 用于设备重命名
-                        String sysInfo = telnetService.sendCommand(name, "display current-configuration | include sysname");
-                        String realName = extractSysname(sysInfo);
-                        if (devName.startsWith("Device_") && realName != null && !realName.isBlank()
-                            && !"Huawei".equalsIgnoreCase(realName)
-                            && !realName.matches("(?i)USG\\d+.*|S\\d+|AR\\d+|CE\\d+")) {
-                            telnetService.rename(devName, realName);
-                            devName = realName;
-                        }
-                        devices.add(new DeviceInfo(devName, model, port));
-                    } else {
+                    log.info("[ConnectAll] " + name + ":" + port + " 开始连接 [" + Thread.currentThread().getName() + "]");
+                    TelnetService.ConnectResult cr = telnetService.connect(name, telnetService.getEnspHost(), port, "admin", pwd);
+                    if (cr == TelnetService.ConnectResult.NEED_PASSWORD) {
                         DeviceInfo d = new DeviceInfo(name, "firewall", port);
                         d.authFailed = true;
                         devices.add(d);
+                        return;
                     }
+                    if (cr != TelnetService.ConnectResult.OK) {
+                        failedList.add(Map.of("name", name, "port", port, "reason", "Telnet 连接失败"));
+                        return;
+                    }
+                    String info = telnetService.queryDeviceInfo(name);
+                    if (isLoginPromptEcho(info)) {
+                        // 会话在登录界面 = 实际需要密码，转入密码弹窗流程，而不是当作连接失败
+                        log.info("[ConnectAll] " + name + ":" + port + " 需密码认证，转入密码流程");
+                        telnetService.disconnect(name);
+                        DeviceInfo d = new DeviceInfo(name, "firewall", port);
+                        d.authFailed = true;
+                        devices.add(d);
+                        return;
+                    }
+                    if (info == null || info.length() < 50) {
+                        // 设备可能刚启动完，等 5 秒重试一次，减少误漏
+                        log.info("[ConnectAll] " + name + ":" + port + " 回显不足(" + (info == null ? 0 : info.length()) + "B)，5秒后重试");
+                        try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
+                        info = telnetService.queryDeviceInfo(name);
+                        if (isLoginPromptEcho(info)) {
+                            log.info("[ConnectAll] " + name + ":" + port + " 重试后仍在登录界面，转入密码流程");
+                            telnetService.disconnect(name);
+                            DeviceInfo d = new DeviceInfo(name, "firewall", port);
+                            d.authFailed = true;
+                            devices.add(d);
+                            return;
+                        }
+                    }
+                    if (info == null || info.length() < 50) {
+                        log.info("[ConnectAll] 跳过 " + name + ":" + port + " - 无有效回显");
+                        telnetService.disconnect(name);
+                        failedList.add(Map.of("name", name, "port", port, "reason", "无有效回显，设备可能未启动完成"));
+                        return;
+                    }
+                    String model = extractModel(info);
+                    if (model == null) model = "unknown";
+                    String devName = name;
+                    // 用轻量摘要替代全量配置（快 5-10 倍，AI 直接用）
+                    String devType = inferType(model);
+                    String cfg = telnetService.queryLightConfig(name, devType);
+                    telnetService.updateCache(name, cfg);
+                    // 快速查 sysname 用于设备重命名
+                    String sysInfo = telnetService.sendCommand(name, "display current-configuration | include sysname");
+                    String realName = extractSysname(sysInfo);
+                    if (devName.startsWith("Device_") && realName != null && !realName.isBlank()
+                        && !"Huawei".equalsIgnoreCase(realName)
+                        && !realName.matches("(?i)USG\\d+.*|S\\d+|AR\\d+|CE\\d+")) {
+                        telnetService.rename(devName, realName);
+                        devName = realName;
+                    }
+                    devices.add(new DeviceInfo(devName, model, port));
                 }, executor));
             }
             try {
-                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(120, TimeUnit.SECONDS);
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(240, TimeUnit.SECONDS);
             } catch (TimeoutException e) {
-                System.err.println("[ConnectAll] 部分设备连接超时");
+                // 整体超时后给慢设备收尾机会，仍未完成的才放弃，避免静默漏设备
+                log.error("[ConnectAll] 部分设备连接超时，再等 45 秒收尾...");
+                for (CompletableFuture<Void> f : futures) {
+                    if (f.isDone()) continue;
+                    try { f.get(45, TimeUnit.SECONDS); }
+                    catch (Exception e2) {
+                        f.cancel(true);
+                        log.error("[ConnectAll] 设备任务取消: " + e2.getMessage());
+                    }
+                }
             }
             executor.shutdown();
 
             // LLDP 邻居匹配：用真实设备连接关系精确识别设备
-            if (body != null && body.get("topologyJson") != null) {
+            if (topoRef != null) {
                 try {
-                    TopologyJson topoRef = objectMapper.readValue(body.get("topologyJson").toString(), TopologyJson.class);
                     matchDevicesByLldp(devices, topoRef);
                 } catch (Exception e) {
-                    System.err.println("[ConnectAll] LLDP匹配异常: " + e.getMessage());
+                    log.error("[ConnectAll] LLDP匹配异常: " + e.getMessage());
                 }
             }
 
@@ -485,7 +534,11 @@ public class ChatController {
             result.put("devices", devices.stream().filter(d -> !d.authFailed).map(d -> d.name).toList());
             if (!authFailed.isEmpty()) {
                 result.put("authFailed", authFailed);
-                result.put("authMsg", "以下防火墙需要密码验证");
+                result.put("authMsg", "以下设备需要密码验证");
+            }
+            if (!failedList.isEmpty()) {
+                result.put("failed", failedList);
+                result.put("failedMsg", "以下设备连接失败，请确认 eNSP 中已启动后重试一键连接");
             }
             Set<String> pwdChanged = telnetService.getAndClearPwdChanged();
             if (!pwdChanged.isEmpty()) {
@@ -512,7 +565,7 @@ public class ChatController {
                 }
                 result.put("topologyJson", objectMapper.writeValueAsString(topo));
             }
-            System.out.println("[ConnectAll] 完成: 连接" + devices.size() + "台, sessions=" + telnetService.getConnectedDevices());
+            log.info("[ConnectAll] 完成: 连接" + devices.size() + "台, sessions=" + telnetService.getConnectedDevices());
             return Result.success(result);
         } catch (Exception e) {
             return Result.error(e.getMessage());
@@ -531,7 +584,7 @@ public class ChatController {
         if ("new".equals(option)) {
             ok = telnetService.connectNewFirewall(name, port);
         } else {
-            ok = telnetService.connect(name, telnetService.getEnspHost(), port, "admin", pwd);
+            ok = telnetService.connect(name, telnetService.getEnspHost(), port, "admin", pwd) == TelnetService.ConnectResult.OK;
         }
 
         if (ok) {
@@ -664,14 +717,14 @@ public class ChatController {
                     Map<String,String> links = parseLldpLinks(lldpRaw);
                     String model = dev.model != null ? dev.model : "unknown";
                     sigs.add(new LlpdSig(dev.name, model, dev.port, links));
-                    System.out.println("[LLDP] " + dev.name + ":" + dev.port + " model=" + model + " links=" + links);
+                    log.info("[LLDP] " + dev.name + ":" + dev.port + " model=" + model + " links=" + links);
                 } catch (Exception e) {
-                    System.err.println("[LLDP] " + dev.name + " 查询失败: " + e.getMessage());
+                    log.error("[LLDP] " + dev.name + " 查询失败: " + e.getMessage());
                 }
             }));
         }
         try { CompletableFuture.allOf(lldpFutures.toArray(new CompletableFuture[0])).get(60, TimeUnit.SECONDS); }
-        catch (Exception e) { System.err.println("[LLDP] 并行查询超时"); }
+        catch (Exception e) { log.error("[LLDP] 并行查询超时"); }
 
         // .topo 签名: {名称, 型号, 连接列表(本端接口, 对方设备名+接口)}
         record TopoSig(String name, String model, Map<String,String> links) {}
@@ -708,7 +761,7 @@ public class ChatController {
                 if (score > bestScore) { bestScore = score; bestMatch = ts; }
             }
             if (bestMatch != null && bestScore > 0 && !bestMatch.name.equals(sig.name)) {
-                System.out.println("[LLDP] 匹配: 端口" + sig.port + "(" + sig.name + "," + sig.model + ") → " + bestMatch.name + " (score=" + bestScore + ")");
+                log.info("[LLDP] 匹配: 端口" + sig.port + "(" + sig.name + "," + sig.model + ") → " + bestMatch.name + " (score=" + bestScore + ")");
                 telnetService.rename(sig.name, bestMatch.name);
                 usedNames.add(bestMatch.name);
                 for (DeviceInfo d : devices) {
@@ -735,4 +788,11 @@ public class ChatController {
     }
 
     private static class DeviceInfo { String name, model; int port; boolean authFailed; DeviceInfo(String n, String m, int p) { name=n; model=m; port=p; } }
+
+    /** 回显是否表明会话停在登录界面（= 需要密码认证） */
+    private boolean isLoginPromptEcho(String info) {
+        if (info == null) return false;
+        if (info.contains("[错误] 需要登录")) return true;
+        return info.length() < 200 && (info.contains("Username:") || info.contains("Password:") || info.contains("login:"));
+    }
 }

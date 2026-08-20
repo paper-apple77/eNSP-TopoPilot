@@ -7,10 +7,13 @@ RUN mvn dependency:go-offline -B
 COPY src ./src
 RUN mvn package -DskipTests -B
 
-# ===== 运行阶段 =====
+# ===== 运行阶段：非 root 用户提升安全性 =====
 FROM eclipse-temurin:17-jre
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 WORKDIR /app
 ENV TZ=Asia/Shanghai
 COPY --from=build /app/target/*.jar app.jar
+RUN chown -R appuser:appgroup /app
 EXPOSE 8080
+USER appuser
 ENTRYPOINT ["java", "-jar", "app.jar"]

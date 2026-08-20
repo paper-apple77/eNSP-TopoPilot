@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.InputStream;
 import java.util.*;
@@ -15,6 +17,8 @@ import java.util.*;
  */
 @Service
 public class CommandKnowledgeService {
+
+    private static final Logger log = LoggerFactory.getLogger(CommandKnowledgeService.class);
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, ModelKnowledge> models = new LinkedHashMap<>();
@@ -68,14 +72,13 @@ public class CommandKnowledgeService {
                     models.put(modelName, mk);
                 }
             }
-            System.out.println("[CommandKnowledge] 加载 " + models.size() + " 种设备型号");
+            log.info("[CommandKnowledge] 加载 " + models.size() + " 种设备型号");
             for (Map.Entry<String, ModelKnowledge> e : models.entrySet()) {
-                System.out.println("[CommandKnowledge]   " + e.getKey()
+                log.info("[CommandKnowledge]   " + e.getKey()
                     + ": " + e.getValue().commands.size() + "cmds, cap=" + e.getValue().capabilities);
             }
         } catch (Exception e) {
-            System.err.println("[CommandKnowledge] 加载失败: " + e.getMessage());
-            e.printStackTrace();
+            log.error("[CommandKnowledge] 加载失败: " + e.getMessage(), e);
         }
     }
 

@@ -33,6 +33,9 @@ public class JwtUtil {
 
     public JwtUtil(@Value("${jwt.secret}") String secret,
                    @Value("${jwt.expiration}") long expiration) {
+        if (secret == null || secret.isBlank() || secret.length() < 32) {
+            throw new IllegalArgumentException("jwt.secret 未配置或过短，至少 32 位，否则签名可被暴力破解");
+        }
         byte[] keyBytes = Base64.getDecoder().decode(secret);
         this.key = Keys.hmacShaKeyFor(keyBytes);
         this.expiration = expiration;

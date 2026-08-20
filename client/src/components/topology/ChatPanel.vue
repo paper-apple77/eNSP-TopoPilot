@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
 
 // 配置 marked
@@ -19,11 +20,44 @@ function renderMd(text: string): string {
   return marked.parse(cleaned) as string
 }
 
+/** 防火墙命名规范化：AI 可能输出 FW_HZ/FW-SH 等 eNSP 默认地名命名，统一改成 FW1, FW2, FW3。
+ *  返回旧名→新名映射，调用方可同步替换 AI 正文里的提及。 */
+function normalizeFirewallNames(update: any): Map<string, string> {
+  const rename = new Map<string, string>()
+  if (!update?.addDevices?.length) return rename
+  // 画布上已有的 FW 编号（增量更新时避免重号）
+  let start = 1
+  try {
+    const cur = JSON.parse(props.topologyJson || '{}')
+    for (const d of cur.devices || []) {
+      const m = /^FW(\d+)$/i.exec(d.name || '')
+      if (m) start = Math.max(start, parseInt(m[1]) + 1)
+    }
+  } catch {}
+  let n = start
+  for (const d of update.addDevices || []) {
+    if (/^FW[-_ ]?[A-Z]{2,3}\d*$/i.test(d.name || '')) {
+      rename.set(d.name, `FW${n++}`)
+    }
+  }
+  if (!rename.size) return rename
+  for (const d of update.addDevices || []) {
+    if (rename.has(d.name)) d.name = rename.get(d.name)
+  }
+  for (const c of update.addConnections || []) {
+    if (rename.has(c.fromDevice)) c.fromDevice = rename.get(c.fromDevice)
+    if (rename.has(c.toDevice)) c.toDevice = rename.get(c.toDevice)
+  }
+  return rename
+}
+
 const messages = ref<Message[]>([])
 const input = ref('')
 const loading = ref(false)
 const chatBody = ref<HTMLDivElement>()
 const selectedDevices = ref<string[]>([])
+/** 用户是否手动动过设备选择：动过之后就不再自动全选，避免覆盖用户的选择 */
+const userTouched = ref(false)
 let abortCtrl: AbortController | null = null
 
 const devices = computed(() => {
@@ -36,9 +70,9 @@ const devices = computed(() => {
 // 已连接设备名集合（快速查找）
 const connectedSet = computed(() => new Set(props.connectedDevices || []))
 
-// 自动选中新连接的设备
+// 自动选中新连接的设备：只在用户还没手动选过时生效，选过后不再干预
 watch(() => props.connectedDevices, (list) => {
-  if (list && list.length > 0) {
+  if (list && list.length > 0 && !userTouched.value) {
     selectedDevices.value = [...list]
   }
 })
@@ -59,6 +93,7 @@ async function send() {
   const msgIdx = messages.value.length
   messages.value.push({ role: 'assistant', content: '⏳ 等待中...' })
   let rawContent = ''
+  let receivedDone = false
   const statusLines: string[] = []
 
   const token = localStorage.getItem('token')
@@ -114,6 +149,7 @@ async function send() {
           continue
         }
         if (data === '[DONE]') {
+          receivedDone = true
           loading.value = false
           let final = statusLines.join('\n') + '\n\n' + rawContent
           final = final
@@ -124,6 +160,7 @@ async function send() {
           if (match) {
             try {
               const update = JSON.parse(match[1].trim())
+              const renames = normalizeFirewallNames(update)
               let cur = { devices: [] as any[], connections: [] as any[] }
               if (update.clear) {
                 // 全量替换
@@ -135,6 +172,10 @@ async function send() {
                 if (update.addConnections) cur.connections.push(...update.addConnections)
               }
               emit('topoUpdate', JSON.stringify(cur))
+              // AI 正文里也替换旧命名，避免聊天文本和画布不一致
+              for (const [oldName, newName] of renames) {
+                final = final.replace(new RegExp('\\b' + oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'g'), newName)
+              }
               final = final.replace(/`{2,}topo[\s\S]*?`{2,}/, '✅ 拓扑已更新')
             } catch {}
           }
@@ -154,11 +195,22 @@ async function send() {
         if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight
       }
     }
+    // 流正常关闭但没收到 [DONE] → 后端异常中断，提示用户而不是静默停止
+    if (!receivedDone) {
+      const partial = (statusLines.join('\n') + '\n\n' + rawContent).trim()
+      messages.value[msgIdx].content = partial + '\n\n⚠️ 连接中断，回复可能不完整。如 AI 停在半路，可发"继续"让它接着完成。'
+    }
   } catch (err: any) {
     if (err.name === 'AbortError') {
       messages.value[msgIdx].content = (statusLines.join('\n') + '\n\n' + rawContent + '\n\n⚠️ 已手动停止').trim()
+    } else if (err instanceof TypeError) {
+      // 网络层错误：后端没启动/连接被拒
+      console.error('[Chat] error:', err)
+      ElMessage.error('无法连接后端服务，请确认后端已启动（默认 http://localhost:8080）')
+      messages.value[msgIdx].content = (statusLines.join('\n') + '\n\n' + rawContent + '\n\n⚠️ 无法连接后端服务').trim()
     } else {
       console.error('[Chat] error:', err)
+      messages.value[msgIdx].content = (statusLines.join('\n') + '\n\n' + rawContent + '\n\n⚠️ 对话异常中断').trim()
     }
   } finally {
     loading.value = false
@@ -195,6 +247,7 @@ function stop() {
           placeholder="选择设备（可选，不选默认全部）"
           size="small"
           clearable
+          @change="userTouched = true"
         >
           <el-option
             v-for="d in devices"

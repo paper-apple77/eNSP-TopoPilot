@@ -7,6 +7,8 @@ import com.topo.model.entity.ChatHistory;
 import com.topo.model.entity.ChatSummary;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -34,6 +36,8 @@ import java.util.function.Consumer;
  */
 @Component
 public class ConversationHistory {
+
+    private static final Logger log = LoggerFactory.getLogger(ConversationHistory.class);
 
     /** 内存保留条数（与 AI 上下文窗口一致） */
     private static final int MAX_IN_MEMORY = 10;
@@ -102,7 +106,7 @@ public class ConversationHistory {
             // 2. 清理超出上限的最旧记录
             chatHistoryMapper.deleteOldest(userId, topoId, m, MAX_IN_DB);
         } catch (Exception e) {
-            System.err.println("[History] 持久化失败（降级为内存）: " + e.getMessage());
+            log.error("[History] 持久化失败（降级为内存）: " + e.getMessage());
         }
 
         // 3. 更新内存缓存：超限的最旧轮次移入待摘要缓冲区，不直接丢弃
@@ -172,7 +176,7 @@ public class ConversationHistory {
             }
             return entries;
         } catch (Exception e) {
-            System.err.println("[History] 读取失败（DB 不可用?）: " + e.getMessage());
+            log.error("[History] 读取失败（DB 不可用?）: " + e.getMessage());
             return null;
         }
     }
@@ -196,7 +200,7 @@ public class ConversationHistory {
                     summarizeAsync(userId, topologyId, mode, batch);
                 }
             } catch (Exception e) {
-                System.err.println("[History] 摘要异常: " + e.getMessage());
+                log.error("[History] 摘要异常: " + e.getMessage());
             } finally {
                 summarizingKeys.remove(k);
             }
@@ -228,7 +232,7 @@ public class ConversationHistory {
             if (summary.length() < 5) return; // AI 没给出有效摘要，保留旧摘要
             saveSummary(userId, topologyId, mode, summary);
         } catch (Exception e) {
-            System.err.println("[History] 摘要生成失败（忽略）: " + e.getMessage());
+            log.error("[History] 摘要生成失败（忽略）: " + e.getMessage());
         }
     }
 

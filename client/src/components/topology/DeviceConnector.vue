@@ -11,6 +11,7 @@ const scanning = ref(false)
 const connecting = ref(false)
 const connectedDevices = ref<string[]>([])
 const authFailedDevices = ref<any[]>([])
+const failedDevices = ref<any[]>([])
 
 /** 导入 .topo */
 function handleImport() {
@@ -52,6 +53,8 @@ async function handleScan() {
 
 async function handleConnectAll() {
   connecting.value = true
+  authFailedDevices.value = []
+  failedDevices.value = []
   try {
     const res = await connectAllDevices(props.topologyJson)
     const data = res.data || res
@@ -66,6 +69,10 @@ async function handleConnectAll() {
     if (data.authFailed?.length > 0) {
       authFailedDevices.value = data.authFailed
       ElMessage.warning(`${data.authMsg || '部分设备需要密码验证'}`)
+    }
+    if (data.failed?.length > 0) {
+      failedDevices.value = data.failed
+      ElMessage.warning(`${data.failedMsg || '部分设备连接失败'}`)
     }
     refreshConnected()
   } catch (e: any) {
@@ -149,6 +156,16 @@ async function handleDisconnect(name: string) {
         </div>
       </div>
 
+      <!-- 连接失败的设备（非密码原因） -->
+      <div v-if="failedDevices.length > 0" class="failed-section">
+        <div class="list-title">连接失败:</div>
+        <div v-for="d in failedDevices" :key="d.name" class="failed-item">
+          <span>{{ d.name }}</span>
+          <span class="failed-reason">{{ d.reason }}</span>
+        </div>
+        <div class="hint">确认 eNSP 设备已启动后，可再次点击一键连接</div>
+      </div>
+
       <!-- 防火墙登录弹窗 -->
       <div v-if="showAuthDialog" class="auth-overlay" @click.self="showAuthDialog = false">
         <div class="auth-dialog">
@@ -194,6 +211,9 @@ async function handleDisconnect(name: string) {
 .auth-section { margin-top: 10px; border-top: 1px solid #eee; padding-top: 8px; }
 .list-title { font-size: 12px; font-weight: 500; margin-bottom: 6px; }
 .auth-item { display: flex; align-items: center; gap: 6px; padding: 4px 0; font-size: 12px; }
+.failed-section { margin-top: 10px; border-top: 1px solid #eee; padding-top: 8px; }
+.failed-item { display: flex; flex-direction: column; gap: 2px; padding: 4px 0; font-size: 12px; color: #f56c6c; }
+.failed-reason { font-size: 11px; color: #999; }
 .btn-auth { padding: 3px 10px; border: 1px solid #E6A23C; background: #fff; color: #E6A23C; border-radius: 3px; cursor: pointer; font-size: 11px; }
 .btn-auth:hover { background: #E6A23C; color: #fff; }
 .auth-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; z-index: 1000; }
